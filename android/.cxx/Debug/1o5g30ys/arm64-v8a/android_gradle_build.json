@@ -1,0 +1,130 @@
+{
+  "buildFiles": [
+    "D:\\apps\\quill_code\\android\\src\\main\\cpp\\CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "C:\\Users\\mathu\\AppData\\Local\\Android\\Sdk\\cmake\\3.22.1\\bin\\ninja.exe",
+      "-C",
+      "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "C:\\Users\\mathu\\AppData\\Local\\Android\\Sdk\\cmake\\3.22.1\\bin\\ninja.exe",
+    "-C",
+    "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "grammar_bash::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "grammar_bash",
+      "output": "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a\\libgrammar_bash.a"
+    },
+    "grammar_c::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "grammar_c",
+      "output": "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a\\libgrammar_c.a"
+    },
+    "grammar_cpp::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "grammar_cpp",
+      "output": "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a\\libgrammar_cpp.a"
+    },
+    "grammar_css::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "grammar_css",
+      "output": "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a\\libgrammar_css.a"
+    },
+    "grammar_dart::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "grammar_dart",
+      "output": "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a\\libgrammar_dart.a"
+    },
+    "grammar_html::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "grammar_html",
+      "output": "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a\\libgrammar_html.a"
+    },
+    "grammar_javascript::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "grammar_javascript",
+      "output": "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a\\libgrammar_javascript.a"
+    },
+    "grammar_json::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "grammar_json",
+      "output": "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a\\libgrammar_json.a"
+    },
+    "grammar_kotlin::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "grammar_kotlin",
+      "output": "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a\\libgrammar_kotlin.a"
+    },
+    "grammar_python::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "grammar_python",
+      "output": "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a\\libgrammar_python.a"
+    },
+    "grammar_rust::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "grammar_rust",
+      "output": "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a\\libgrammar_rust.a"
+    },
+    "grammar_typescript::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "grammar_typescript",
+      "output": "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a\\libgrammar_typescript.a"
+    },
+    "grammar_xml::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "grammar_xml",
+      "output": "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a\\libgrammar_xml.a"
+    },
+    "grammar_yaml::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "grammar_yaml",
+      "output": "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a\\libgrammar_yaml.a"
+    },
+    "quill_ts::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "quill_ts",
+      "output": "D:\\apps\\quill_code\\example\\build\\quill_code\\intermediates\\cxx\\Debug\\1o5g30ys\\obj\\arm64-v8a\\libquill_ts.so",
+      "runtimeFiles": []
+    },
+    "tree_sitter::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "tree_sitter",
+      "output": "D:\\apps\\quill_code\\android\\.cxx\\Debug\\1o5g30ys\\arm64-v8a\\libtree_sitter.a"
+    }
+  },
+  "toolchains": {
+    "toolchain": {
+      "cCompilerExecutable": "C:\\Users\\mathu\\AppData\\Local\\Android\\Sdk\\ndk\\26.1.10909125\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe",
+      "cppCompilerExecutable": "C:\\Users\\mathu\\AppData\\Local\\Android\\Sdk\\ndk\\26.1.10909125\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe"
+    }
+  },
+  "cFileExtensions": [
+    "c"
+  ],
+  "cppFileExtensions": [
+    "cc"
+  ]
+}

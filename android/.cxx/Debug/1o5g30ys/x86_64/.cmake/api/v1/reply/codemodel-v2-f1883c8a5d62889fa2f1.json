@@ -1,0 +1,195 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"jsonFile" : "directory-.-Debug-d0094a50bb2071803777.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6.0"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						12,
+						13,
+						14,
+						15
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "quill_tree_sitter",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						12,
+						13,
+						14,
+						15
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "grammar_bash::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-grammar_bash-Debug-ce05301b695ef598c1a9.json",
+					"name" : "grammar_bash",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "grammar_c::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-grammar_c-Debug-d57e3d2158451bf96912.json",
+					"name" : "grammar_c",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "grammar_cpp::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-grammar_cpp-Debug-8b2415abd2faecdee273.json",
+					"name" : "grammar_cpp",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "grammar_css::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-grammar_css-Debug-d7e25851881473e4d6c7.json",
+					"name" : "grammar_css",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "grammar_dart::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-grammar_dart-Debug-a84f4ffc8b1cf145241b.json",
+					"name" : "grammar_dart",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "grammar_html::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-grammar_html-Debug-a9c133a38cd3f5572af3.json",
+					"name" : "grammar_html",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "grammar_javascript::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-grammar_javascript-Debug-d512671071861986366e.json",
+					"name" : "grammar_javascript",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "grammar_json::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-grammar_json-Debug-26bc7446839208ad2053.json",
+					"name" : "grammar_json",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "grammar_kotlin::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-grammar_kotlin-Debug-c0b8c18f2d7c10aa853e.json",
+					"name" : "grammar_kotlin",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "grammar_python::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-grammar_python-Debug-48c6356b9493e71298de.json",
+					"name" : "grammar_python",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "grammar_rust::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-grammar_rust-Debug-b1f6e94e4cf7b60332cc.json",
+					"name" : "grammar_rust",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "grammar_typescript::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-grammar_typescript-Debug-92b08ea3ec320943adfe.json",
+					"name" : "grammar_typescript",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "grammar_xml::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-grammar_xml-Debug-d6a3a726fa9b3e924f47.json",
+					"name" : "grammar_xml",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "grammar_yaml::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-grammar_yaml-Debug-5944994b4a8f28c9cbf3.json",
+					"name" : "grammar_yaml",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "quill_ts::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-quill_ts-Debug-90fe472f83d1f7531830.json",
+					"name" : "quill_ts",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "tree_sitter::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-tree_sitter-Debug-491ed16f625d83fb8831.json",
+					"name" : "tree_sitter",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "D:/apps/quill_code/android/.cxx/Debug/1o5g30ys/x86_64",
+		"source" : "D:/apps/quill_code/android/src/main/cpp"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}
