@@ -40,7 +40,7 @@ target_include_directories(tree_sitter PUBLIC
 )
 # Accept grammar ABI versions 13 through 15 regardless of the exact tree-sitter runtime tag.
 target_compile_definitions(tree_sitter PRIVATE
-  TREE_SITTER_LANGUAGE_VERSION=14
+  TREE_SITTER_LANGUAGE_VERSION=15
   TREE_SITTER_MIN_COMPATIBLE_LANGUAGE_VERSION=13
 )
 
