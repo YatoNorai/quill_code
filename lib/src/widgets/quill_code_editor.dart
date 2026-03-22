@@ -144,6 +144,10 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
 
   // ── Keyboard height tracking — for auto-scroll when virtual keyboard opens ──
   double _prevKbHeight = 0.0;
+  /// Viewport dimension quando o teclado está fechado (kbHeight ≈ 0).
+  /// Usado para detectar se o Scaffold já redimensionou o viewport ao abrir o
+  /// teclado (resizeToAvoidBottomInset:true), evitando dupla subtração de kbHeight.
+  double _noKbViewportDimension = 0.0;
 
   // ── Granular notifiers — drive targeted repaints with NO setState ──────
   /// Bumped on every cursor/selection/content change → handle layer + overlays
@@ -230,16 +234,17 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   double get _cw => _effectiveTheme.fontSize * 0.601;
 
   double _calcGw() {
-    final ctrl   = widget.controller;
-    final digits = ctrl.content.lineCount.toString().length;
-    final fs     = _effectiveTheme.fontSize;
+    final ctrl     = widget.controller;
+    final digits   = ctrl.content.lineCount.toString().length;
+    final fs       = _effectiveTheme.fontSize;
+    // Números usam o mesmo fontSize do código para garantir alinhamento perfeito
+    // em qualquer nível de zoom — sem multiplicador separado.
+    final numCharW = fs * 0.601;
     double w = 0;
-    if (ctrl.props.showLineNumbers) w += fs * 0.62 * digits + 14;
+    if (ctrl.props.showLineNumbers) w = numCharW * digits + 4;
     if (ctrl.props.showFoldArrows)  w += 18;
-    // Only enforce minimum gutter width when at least one element is shown.
     if (w < 4) return 0;
-    // Minimum 28 only when line numbers are shown; fold-arrows-only = 18px.
-    return ctrl.props.showLineNumbers ? math.max(28.0, w) : w;
+    return w;
   }
 
   // ── Visible-lines with invalidation cache ─────────────────────────────
@@ -374,12 +379,14 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Detect when the virtual keyboard opens: viewInsets.bottom grows.
-    // _ensureCursorVisible already accounts for kbHeight, so calling it here
-    // scrolls the cursor above the keyboard without any extra computation.
+    // Detect when the virtual keyboard opens/changes height: viewInsets.bottom grows.
+    // Usamos jumpTo (instant: true) para que o scroll seja instantâneo a cada frame
+    // da animação do teclado — evita que o cursor fique oculto atrás do teclado
+    // durante a abertura. O scroll animado causaria defasagem visível porque
+    // didChangeDependencies dispara múltiplas vezes enquanto o teclado sobe.
     final kbH = MediaQuery.of(context).viewInsets.bottom;
     if (kbH > _prevKbHeight) {
-      _ensureCursorVisible();
+      _ensureCursorVisible(instant: true);
     }
     _prevKbHeight = kbH;
   }
@@ -396,11 +403,21 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
       // per file), treat it exactly like setText(): reset scroll + gutter.
       _onScrollReset();
     }
-    // If host changes theme externally, reset effective theme
-    // (but preserve current fontSize if a pinch-zoom is active)
+    // Se o host mudou o tema externamente (ex: troca de arquivo/linguagem),
+    // adota as novas cores/fontes MAS preserva o fontSize atual do usuário,
+    // A menos que o próprio tema tenha mudado o fontSize (ex: usuário clicou
+    // nos botões + / − de fonte), caso em que adotamos o novo tamanho.
     if (old.theme != widget.theme) {
-      final newBase = widget.theme ?? QuillThemeDark.build();
-      _effectiveTheme = newBase;
+      final newBase   = widget.theme ?? QuillThemeDark.build();
+      final oldBase   = old.theme;
+      // Detecta se o fontSize base mudou externamente (botões +/−).
+      final baseFsChanged = oldBase != null &&
+          (newBase.fontSize - oldBase.fontSize).abs() > 0.5;
+      _effectiveTheme = baseFsChanged
+          ? newBase                                          // usuário mudou via +/−
+          : newBase.copyWith(fontSize: _effectiveTheme.fontSize); // preserva zoom do pinch
+      // Sincroniza _zoomN para que _onZoomChanged → _calcGw → _gwN fiquem coerentes.
+      if (!baseFsChanged) _zoomN.value = _effectiveTheme.fontSize;
     }
   }
 
@@ -497,10 +514,15 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
       if (_hCtrl.hasClients) _hCtrl.jumpTo(0);
     });
 
-    // setState forces the LayoutBuilder to re-run its builder callback, which
-    // recalculates _gw = _calcGw() with the new lineCount → gutter digit-width
-    // updates immediately when switching files with different line count magnitude.
-    setState(() {});
+    // Recalcula _gw imediatamente com o novo lineCount do arquivo/controller.
+    // Atualiza _gwN para que o _EBox e o GutterPainter repintem com a nova
+    // largura antes mesmo do LayoutBuilder rodar — evita o frame com números
+    // cortados quando o arquivo novo tem mais dígitos que o anterior.
+    final newGw = _calcGw();
+    if ((newGw - _gw).abs() > 0.5) {
+      _gwN.value = newGw;
+    }
+    setState(() { _gw = newGw; });
   }
 
   void _onVScroll() {
@@ -601,6 +623,14 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     // Sync blink interval when props change
     final blinkDur = Duration(milliseconds: ctrl.props.cursorBlinkIntervalMs);
     if (_blink.duration != blinkDur) _blink.duration = blinkDur;
+    // Recalculate gutter width whenever props change (showLineNumbers,
+    // showFoldArrows, etc.). Se a largura mudou, aciona setState para que
+    // o LayoutBuilder reconstrua imediatamente — sem precisar de pinça.
+    final newGw = _calcGw();
+    if ((newGw - _gw).abs() > 0.5) {
+      _gwN.value = newGw;
+      setState(() { _gw = newGw; });
+    }
     // Only fire onChanged when the text actually changed (not style updates)
     final newVer = ctrl.content.documentVersion;
     if (newVer != _lastContentVersion) {
@@ -654,44 +684,89 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   // ═══════════════════════════════════════════════════════════════════════
   // Ensure cursor visible after edit
   // ═══════════════════════════════════════════════════════════════════════
-  void _ensureCursorVisible() {
+
+  /// Garante que o cursor esteja visível no viewport.
+  /// Quando [instant] é true, usa jumpTo (sem animação) — necessário durante
+  /// a animação de abertura do teclado para resposta frame-a-frame.
+  ///
+  /// IMPORTANTE — dupla subtração:
+  /// O LayoutBuilder já recebe bc.maxHeight SEM a área do teclado quando
+  /// Scaffold usa resizeToAvoidBottomInset:true (padrão). Portanto
+  /// vp.viewportDimension já exclui o teclado e NÃO deve ter kbHeight
+  /// subtraído novamente.
+  /// Para o caso resizeToAvoidBottomInset:false, o viewport NÃO shrink e
+  /// aí sim precisamos subtrair — detectamos isso comparando com
+  /// _noKbViewportDimension (baseline sem teclado).
+  void _ensureCursorVisible({bool instant = false}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_vCtrl.hasClients) return;
-      // Account for soft keyboard: reduce visible viewport by keyboard height
       final kbHeight = MediaQuery.of(context).viewInsets.bottom;
+      final vp   = _vCtrl.position;
       final line = widget.controller.cursor.line;
       final col  = widget.controller.cursor.column;
-      final vp   = _vCtrl.position;
       final curY = line * _lh;
-      // Visible height shrinks by keyboard
-      final visH = vp.viewportDimension - kbHeight;
+
+      // Atualiza baseline quando o teclado está fechado
+      if (kbHeight < 10) _noKbViewportDimension = vp.viewportDimension;
+
+      // Detecta se o Scaffold já encolheu o viewport pelo teclado.
+      // Se sim, vp.viewportDimension já é a altura visível correta — não subtrai.
+      // Se não (resizeToAvoidBottomInset:false), subtrai kbHeight manualmente.
+      final scaffoldResized = _noKbViewportDimension > 0 &&
+          (_noKbViewportDimension - vp.viewportDimension) >= kbHeight * 0.6;
+      final visH = scaffoldResized
+          ? vp.viewportDimension
+          : math.max(40.0, vp.viewportDimension - kbHeight);
+
       if (curY < vp.pixels) {
-        _vCtrl.animateTo(curY.clamp(0.0, vp.maxScrollExtent),
-            duration: const Duration(milliseconds: 120), curve: Curves.easeOut);
+        final target = curY.clamp(0.0, vp.maxScrollExtent);
+        if (instant) {
+          _vCtrl.jumpTo(target);
+        } else {
+          _vCtrl.animateTo(target,
+              duration: const Duration(milliseconds: 120), curve: Curves.easeOut);
+        }
       } else if (curY + _lh > vp.pixels + visH) {
-        _vCtrl.animateTo((curY + _lh - visH).clamp(0.0, vp.maxScrollExtent),
-            duration: const Duration(milliseconds: 120), curve: Curves.easeOut);
+        final target = (curY + _lh - visH).clamp(0.0, vp.maxScrollExtent);
+        if (instant) {
+          _vCtrl.jumpTo(target);
+        } else {
+          _vCtrl.animateTo(target,
+              duration: const Duration(milliseconds: 120), curve: Curves.easeOut);
+        }
       }
       if (_hCtrl.hasClients) {
         final hp  = _hCtrl.position;
         final curX = col * _cw;
-        // When fixedLineNumbers=true the gutter is fixed and doesn't eat into
-        // the horizontal scroll extent; when false the gutter scrolls with code.
         final gutterW = widget.controller.props.fixedLineNumbers ? _gw + _codePad : _codePad;
-        // How many logical px of right margin to keep visible ahead of the cursor.
-        const rightMargin = 8.0 * 8; // ~8 character widths
+        const rightMargin = 8.0 * 8;
         final visLeft  = hp.pixels;
         final minimapW = widget.controller.props.showMinimap ? _minimapWidth : 0.0;
         final visRight = hp.pixels + hp.viewportDimension - gutterW - minimapW;
         final curRight = curX + rightMargin;
         if (curX < visLeft + gutterW) {
-          // Cursor is left of visible area — scroll left, keep gutter clear
           _hCtrl.jumpTo((curX - gutterW - _cw).clamp(0.0, hp.maxScrollExtent));
         } else if (curRight > visRight) {
-          // Cursor is approaching / past right edge — scroll right proactively
           _hCtrl.jumpTo((curRight - (hp.viewportDimension - gutterW - minimapW)).clamp(0.0, hp.maxScrollExtent));
         }
       }
+    });
+  }
+
+  /// Chamado quando o usuário toca numa linha para abrir o teclado.
+  /// Agenda verificações extras para cobrir o momento em que o teclado
+  /// termina de abrir (~250-400ms) — o didChangeDependencies cobre cada frame
+  /// da animação, e os Timers garantem o frame final estabilizado.
+  void _ensureCursorVisibleAfterTap() {
+    _ensureCursorVisible(instant: true);
+    // Teclado Android leva ~250-350ms para abrir completamente.
+    // Verificamos em 300ms e 500ms para garantir que o cursor fique visível
+    // mesmo se algum frame intermediário for perdido.
+    Timer(const Duration(milliseconds: 300), () {
+      if (mounted) _ensureCursorVisible(instant: true);
+    });
+    Timer(const Duration(milliseconds: 500), () {
+      if (mounted) _ensureCursorVisible(instant: true);
     });
   }
 
@@ -950,6 +1025,11 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     _cursorTick.value++;
     _showCursorHandle();
     _updateLightbulbAndSymbol();
+    // Garante scroll instantâneo caso o teclado virtual vá cobrir a linha tocada.
+    // didChangeDependencies já cobre cada frame da animação do teclado, mas
+    // _ensureCursorVisibleAfterTap agenda checks extras no frame seguinte para
+    // capturar o momento em que o teclado atinge a altura final.
+    _ensureCursorVisibleAfterTap();
   }
 
   /// Returns true if [tap] is within the hit-zone of any currently visible handle.
@@ -2671,13 +2751,14 @@ class _EditorViewport extends LeafRenderObjectWidget {
   }
 
   double _calcGw() {
-    final digits = _ctrl.content.lineCount.toString().length;
-    final fs = _theme.fontSize;
+    final digits   = _ctrl.content.lineCount.toString().length;
+    final fs       = _theme.fontSize;
+    final numCharW = fs * 0.601;
     double w = 0;
-    if (_ctrl.props.showLineNumbers) w += fs * 0.62 * digits + 14;
+    if (_ctrl.props.showLineNumbers) w = numCharW * digits + 4;
     if (_ctrl.props.showFoldArrows)  w += 18;
     if (w < 4) return 0;
-    return _ctrl.props.showLineNumbers ? math.max(28.0, w) : w;
+    return w;
   }
 
   /// Focal point (local coords) capturado no início do pinch — usado para
@@ -2725,9 +2806,16 @@ class _EditorViewport extends LeafRenderObjectWidget {
     // Also sync the ScrollController (used by minimap and edge-scroll)
     // via postFrameCallback since jumpTo requires the scroll position
     // to be fully attached, which may not be the case mid-layout.
-    final targetSY = newSY;
+    // IMPORTANTE: captura o controller atual — se o usuário trocar de arquivo
+    // antes deste callback disparar, _ctrl será diferente e o jump é cancelado.
+    // Sem isso, o jump do zoom sobrescreveria o jumpTo(0) do _onScrollReset,
+    // deslocando o código para baixo do gutter após a troca de arquivo.
+    final targetSY   = newSY;
+    final zoomCtrl   = _ctrl;   // snapshot do controller no momento do zoom
     WidgetsBinding.instance.addPostFrameCallback((_) {
       try {
+        // Se o controller foi trocado (arquivo novo), não repositiona.
+        if (!identical(_ctrl, zoomCtrl)) return;
         if (_scrollCtrl.hasClients &&
             (_scrollCtrl.offset - targetSY).abs() > 0.5) {
           _scrollCtrl.jumpTo(
@@ -3117,11 +3205,8 @@ class _EditorViewport extends LeafRenderObjectWidget {
   void _gRow(Canvas c, double ox, double y, int line, EditorColorScheme cs, [double? rowHeight]) {
     final rh    = rowHeight ?? lh;
     final hasBP = _ctrl.hasBreakpoint(line);
-    final fs    = (_theme.fontSize * 0.82).clamp(7.0, 64.0);
-    final nr    = _ctrl.props.showFoldArrows ? _gw - 18 : _gw - 5;
-    // Always centre in the FIRST sub-row so the line number aligns with the
-    // first wrapped sub-line instead of the vertical midpoint of the whole block.
-    final cy    = y + lh / 2;
+    final fs    = _theme.fontSize; // mesmo tamanho do código
+    final nr    = _ctrl.props.showFoldArrows ? _gw - 18 : _gw - 2;
 
     if (_ctrl.props.showLineNumbers) {
       final isCur = line == _ctrl.cursor.line;
@@ -3131,25 +3216,29 @@ class _EditorViewport extends LeafRenderObjectWidget {
           fontSize: fs, fontFamily: _theme.fontFamily, height: 1.0,
         )),
         textDirection: TextDirection.ltr,
-      )..layout(maxWidth: math.max(8.0, nr - ox - 4));
+      )..layout(maxWidth: math.max(4.0, nr - ox));
 
-      final numX = ox + nr - tp.width;
-      final numY = cy - tp.height / 2;
+      // Mesma fórmula de _paintLine: rowTop + (rowHeight - tp.height) / 2
+      // Garante alinhamento perfeito independente de diferenças de métricas.
+      final numX = math.max(ox, ox + nr - tp.width);
+      final numY = y + (rh - tp.height) / 2;
 
       if (hasBP) {
         // Circle behind the number, centred on it
         const bpR  = 9.0;
+        final bpCy = y + rh / 2;
         final bpCx = numX + tp.width / 2;
-        c.drawCircle(Offset(bpCx, cy), bpR, _pBp1);
-        c.drawCircle(Offset(bpCx, cy), bpR, _pBp2);
+        c.drawCircle(Offset(bpCx, bpCy), bpR, _pBp1);
+        c.drawCircle(Offset(bpCx, bpCy), bpR, _pBp2);
       }
 
       c.save();
-      c.clipRect(Rect.fromLTWH(ox, y, _gw - 1, lh));
+      c.clipRect(Rect.fromLTWH(ox, y, _gw - 1, rh));
       tp.paint(c, Offset(numX, numY));
       c.restore();
     } else if (hasBP) {
       const bpR = 9.0;
+      final cy = y + rh / 2;
       c.drawCircle(Offset(ox + _gw / 2, cy), bpR, _pBp1);
       c.drawCircle(Offset(ox + _gw / 2, cy), bpR, _pBp2);
     }
@@ -4065,12 +4154,9 @@ class _GutterPainter extends CustomPainter {
   void _row(Canvas canvas, EditorColorScheme cs, int line, double y, double lhS) {
     final hasBP = controller.hasBreakpoint(line);
     final isCur = line == controller.cursor.line;
-    final fs    = (zoom * 0.82).clamp(7.0, 64.0);
+    final fs    = zoom; // mesmo tamanho do código — alinhamento garantido
     // Right-align position (same whether or not there is a breakpoint)
-    final nr    = controller.props.showFoldArrows ? gw - 18 : gw - 5;
-    // Centre in first sub-row so the number aligns with the first wrapped line.
-    final cy    = y + lhU / 2;
-
+    final nr    = controller.props.showFoldArrows ? gw - 18 : gw - 2;
     if (controller.props.showLineNumbers) {
       final tp = TextPainter(
         text: TextSpan(
@@ -4083,29 +4169,32 @@ class _GutterPainter extends CustomPainter {
           ),
         ),
         textDirection: TextDirection.ltr,
-      )..layout(maxWidth: math.max(8.0, nr - 4));
+      )..layout(maxWidth: math.max(4.0, nr));
 
-      // Number X position (right-aligned)
-      final numX = nr - tp.width;
-      final numY = cy - tp.height / 2;
+      // Mesma fórmula de _paintLine: y + (rowHeight - tp.height) / 2
+      // Usa lhS (altura real da linha passada como parâmetro) — não lhU.
+      final numX = math.max(0.0, nr - tp.width);
+      final numY = y + (lhS - tp.height) / 2;
 
       if (hasBP) {
         // Circle centred on the number, drawn BEFORE the number so number is on top
         const bpR = 9.0;
+        final bpCy = y + lhS / 2;
         final bpCx = numX + tp.width / 2;   // horizontally centred on number
-        canvas.drawCircle(Offset(bpCx, cy), bpR, _pBp1);
-        canvas.drawCircle(Offset(bpCx, cy), bpR, _pBp2);
+        canvas.drawCircle(Offset(bpCx, bpCy), bpR, _pBp1);
+        canvas.drawCircle(Offset(bpCx, bpCy), bpR, _pBp2);
       }
 
       canvas.save();
-      canvas.clipRect(Rect.fromLTWH(0, y, gw - 1, lhU));
+      canvas.clipRect(Rect.fromLTWH(0, y, gw - 1, lhS));
       tp.paint(canvas, Offset(numX, numY));
       canvas.restore();
     } else if (hasBP) {
       // No line numbers — draw circle at standard gutter position
       const bpR = 9.0;
-      canvas.drawCircle(Offset(gw / 2, cy), bpR, _pBp1);
-      canvas.drawCircle(Offset(gw / 2, cy), bpR, _pBp2);
+      final bpCy = y + lhS / 2;
+      canvas.drawCircle(Offset(gw / 2, bpCy), bpR, _pBp1);
+      canvas.drawCircle(Offset(gw / 2, bpCy), bpR, _pBp2);
     }
 
     if (controller.props.showFoldArrows) {
