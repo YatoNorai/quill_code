@@ -2588,6 +2588,33 @@ class _EditorViewport extends LeafRenderObjectWidget {
   final Paint _pBp2      = Paint()..color = const Color(0xFFB71C1C)..style = PaintingStyle.stroke..strokeWidth = 1.2;
   final Paint _pArrow    = Paint()..style = PaintingStyle.stroke..strokeWidth = 1.5..strokeCap = StrokeCap.round..strokeJoin = StrokeJoin.round;
 
+  // ── Cached derived colors — rebuilt only when cs/alpha changes ──────────
+  // Avoids Color.withOpacity() allocation on every frame in paint().
+  EditorColorScheme? _cachedCs;
+  double _cachedAlpha = -1.0;
+  Color _cachedCursorColor    = const Color(0xFF000000);
+  Color _cachedSelColor       = const Color(0x33000000);
+  Color _cachedSearchBgColor  = const Color(0x33000000);
+  Color _cachedSearchFgColor  = const Color(0xFF000000);
+  Color _cachedSymH1Color     = const Color(0x33000000);
+  Color _cachedSymH2Color     = const Color(0xFF000000);
+  Color _cachedBpBgColor      = const Color(0x33000000);
+  Color _cachedGhostBgColor   = const Color(0x0F000000);
+
+  void _rebuildCachedColors(EditorColorScheme cs, double alpha) {
+    if (identical(cs, _cachedCs) && (_cachedAlpha - alpha).abs() < 0.01) return;
+    _cachedCs    = cs;
+    _cachedAlpha = alpha;
+    _cachedCursorColor   = (_ctrl.props.cursorColor ?? cs.cursor).withOpacity(alpha.clamp(0.0, 1.0));
+    _cachedSelColor      = cs.selectionColor;
+    _cachedSearchBgColor = cs.searchMatchBackground;
+    _cachedSearchFgColor = cs.searchMatchBorder.withOpacity(0.35);
+    _cachedSymH1Color    = cs.type_.withOpacity(0.22);
+    _cachedSymH2Color    = cs.type_.withOpacity(0.7);
+    _cachedBpBgColor     = cs.ghostTextForeground.withOpacity(0.04);
+    _cachedGhostBgColor  = cs.ghostTextForeground.withOpacity(0.04);
+  }
+
   // Word-wrap: accumulated Y offset for each visual index.
   // Empty when wordWrap is off — rowY(vi) falls back to vi*lh.
   // Rebuilt in performLayout whenever wordWrap is on.
@@ -2849,6 +2876,9 @@ class _EditorViewport extends LeafRenderObjectWidget {
 
   void _dirty() {
     _lc.clear();
+    // Invalidate gutter TP cache when content changes (line count may change).
+    for (final tp in _gutterTpCache.values) tp.dispose();
+    _gutterTpCache.clear();
     _wrapOffsets  = const [];
     // _wrapHeights is preserved: performLayout will do incremental rebuild
     // using _wrapHeightsDirtyVi (set by _onContentChange before this call).
@@ -3080,6 +3110,7 @@ class _EditorViewport extends LeafRenderObjectWidget {
   void paint(PaintingContext ctx, Offset off) {
     final c  = ctx.canvas; final cs = _theme.colorScheme;
     final sY = _vOff.pixels; final sX = _hOff.pixels;
+    _rebuildCachedColors(cs, _alpha);
     final vc = _vis.length;
     if (vc == 0) { _pBg.color = cs.background; c.drawRect(off & size, _pBg); return; }
 
@@ -3202,6 +3233,14 @@ class _EditorViewport extends LeafRenderObjectWidget {
     c.drawLine(Offset(ox + _gw, off.dy), Offset(ox + _gw, off.dy + size.height), _pLnDiv);
   }
 
+  // Gutter TextPainter cache: keyed by (line_number, font_size_int, normal_color_value).
+  // Avoids creating and laying out a TextPainter for EVERY visible line EVERY frame.
+  // Capacity: 512 entries covers a full screen at any reasonable font size.
+  final Map<int, TextPainter> _gutterTpCache = {};
+  static const int _gutterTpMax = 512;
+  int _gutterCacheFs = 0; // invalidate when fontSize changes
+  int _gutterCacheColor = 0; // invalidate when theme color changes
+
   void _gRow(Canvas c, double ox, double y, int line, EditorColorScheme cs, [double? rowHeight]) {
     final rh    = rowHeight ?? lh;
     final hasBP = _ctrl.hasBreakpoint(line);
@@ -3209,14 +3248,37 @@ class _EditorViewport extends LeafRenderObjectWidget {
     final nr    = _ctrl.props.showFoldArrows ? _gw - 18 : _gw - 2;
 
     if (_ctrl.props.showLineNumbers) {
-      final isCur = line == _ctrl.cursor.line;
-      final tp    = TextPainter(
-        text: TextSpan(text: '${line + 1}', style: TextStyle(
-          color: hasBP ? Colors.white : (isCur ? cs.lineNumberCurrent : cs.lineNumber),
-          fontSize: fs, fontFamily: _theme.fontFamily, height: 1.0,
-        )),
-        textDirection: TextDirection.ltr,
-      )..layout(maxWidth: math.max(4.0, nr - ox));
+      final isCur  = line == _ctrl.cursor.line;
+      final color  = hasBP ? Colors.white : (isCur ? cs.lineNumberCurrent : cs.lineNumber);
+      // Invalidate entire cache when fontSize or base color changes (theme/zoom).
+      final fsInt = fs.toInt();
+      final colorVal = cs.lineNumber.value;
+      if (fsInt != _gutterCacheFs || colorVal != _gutterCacheColor) {
+        for (final tp in _gutterTpCache.values) tp.dispose();
+        _gutterTpCache.clear();
+        _gutterCacheFs    = fsInt;
+        _gutterCacheColor = colorVal;
+      }
+      // Cache key encodes: line number + whether it's current line + has breakpoint.
+      // Current line uses a different color so gets its own entry.
+      final cacheKey = line * 4 + (isCur ? 1 : 0) + (hasBP ? 2 : 0);
+      TextPainter? tp = _gutterTpCache[cacheKey];
+      if (tp == null) {
+        tp = TextPainter(
+          text: TextSpan(text: '${line + 1}', style: TextStyle(
+            color: color,
+            fontSize: fs, fontFamily: _theme.fontFamily, height: 1.0,
+          )),
+          textDirection: TextDirection.ltr,
+        )..layout(maxWidth: math.max(4.0, nr - ox));
+        if (_gutterTpCache.length >= _gutterTpMax) {
+          // Evict oldest entry
+          final oldest = _gutterTpCache.keys.first;
+          _gutterTpCache[oldest]?.dispose();
+          _gutterTpCache.remove(oldest);
+        }
+        _gutterTpCache[cacheKey] = tp;
+      }
 
       // Mesma fórmula de _paintLine: rowTop + (rowHeight - tp.height) / 2
       // Garante alinhamento perfeito independente de diferenças de métricas.
@@ -3845,9 +3907,7 @@ class _EditorViewport extends LeafRenderObjectWidget {
   void _paintCursor(Canvas c, Offset off, EditorColorScheme cs, double sY, double sX, int vi) {
     final x = off.dx + _gw + _codePad + _ctrl.cursor.column * cw - sX;
     final y = off.dy + _rowY(vi) - sY;
-    final cursorCol = (_ctrl.props.cursorColor ?? cs.cursor)
-        .withOpacity(_alpha.clamp(0.0, 1.0));
-    _pCursor.color       = cursorCol;
+    _pCursor.color       = _cachedCursorColor;
     _pCursor.strokeWidth = _theme.cursorWidth;
     c.drawLine(Offset(x, y + 1), Offset(x, y + _rowH(vi) - 1), _pCursor);
   }
@@ -3884,7 +3944,7 @@ class _EditorViewport extends LeafRenderObjectWidget {
     );
 
     // Background tint for multi-line ghost block (helps distinguish from real code).
-    final bgPaint = Paint()..color = cs.ghostTextForeground.withOpacity(0.04);
+    _pBg.color = _cachedGhostBgColor; // reuse cached paint — no alloc
 
     for (int gi = 0; gi < lines.length; gi++) {
       final ghostLine = lines[gi];
@@ -3911,7 +3971,7 @@ class _EditorViewport extends LeafRenderObjectWidget {
         // Tint the background of virtual rows
         c.drawRect(
           Rect.fromLTWH(off.dx + _gw, y, size.width - _gw, lh),
-          bgPaint,
+          _pBg,
         );
       }
 
@@ -3976,9 +4036,9 @@ class _EditorViewport extends LeafRenderObjectWidget {
     final x1 = off.dx + _gw + _codePad + r.start.column * cw - sX;
     final x2 = off.dx + _gw + _codePad + r.end.column   * cw - sX;
     if (x2 <= x1) return;
-    _pSymH1.color = cs.type_.withOpacity(0.22);
+    _pSymH1.color = _cachedSymH1Color;
     c.drawRRect(RRect.fromRectAndRadius(Rect.fromLTWH(x1, y + 2, x2 - x1, _rowH(vi) - 4), const Radius.circular(3)), _pSymH1);
-    _pSymH2.color = cs.type_.withOpacity(0.7);
+    _pSymH2.color = _cachedSymH2Color;
     c.drawLine(Offset(x1, y + lh - 2), Offset(x2, y + lh - 2), _pSymH2);
   }
 
@@ -4041,6 +4101,7 @@ class _EditorViewport extends LeafRenderObjectWidget {
     _ctrl.tokenizationVersion.removeListener(_onTokenizationDone);
     _ctrl.ghostText.removeListener(_onGhostChanged);
     for (final tp in _lc.values) tp.dispose(); _lc.clear();
+    for (final tp in _gutterTpCache.values) tp.dispose(); _gutterTpCache.clear();
     super.dispose();
   }
 }

@@ -1,39 +1,44 @@
 // lib/src/language/javascript_language.dart
 import '../highlighting/span.dart';
-import '_regex_language.dart';
-import '../tree_sitter/ts_language.dart';
+import 'monarch_language.dart';
 
-
-class JavaScriptLanguage extends RegexLanguage with TsLanguageMixin {
-  @override
-  String get name => 'JavaScript';
-  @override
-  String get tsName => 'javascript';
+class JavaScriptLanguage extends MonarchLanguage {
+  @override String get name => 'JavaScript';
+  @override String get lineCommentPrefix => '//';
 
   static const _kw = [
     'async','await','break','case','catch','class','const','continue',
     'debugger','default','delete','do','else','export','extends','false',
-    'finally','for','from','function','if','import','in','instanceof',
-    'let','new','null','of','return','static','super','switch','this',
+    'finally','for','from','function','get','if','import','in','instanceof',
+    'let','new','null','of','return','set','static','super','switch','this',
     'throw','true','try','typeof','undefined','var','void','while','with','yield',
   ];
+  @override List<String> get completionKeywords => _kw;
 
   @override
-  List<String> get completionKeywords => _kw;
-
-  @override
-  List<TokenRule> get rules => [
-    TokenRule(r'//.*', TokenType.comment),
-    TokenRule(r'/\*[\s\S]*?\*/', TokenType.comment),
-    TokenRule(r'`(?:[^`\\]|\\.)*`', TokenType.string),
-    TokenRule(r'"(?:[^"\\]|\\.)*"', TokenType.string),
-    TokenRule(r"'(?:[^'\\]|\\.)*'", TokenType.string),
-    TokenRule(r'\b\d+\.?\d*\b', TokenType.number),
-    TokenRule(r'\b(?:async|await|break|case|catch|class|const|continue|debugger|default|delete|do|else|export|extends|false|finally|for|from|function|if|import|in|instanceof|let|new|null|of|return|static|super|switch|this|throw|true|try|typeof|undefined|var|void|while|with|yield)\b', TokenType.keyword),
-    TokenRule(r'\b[a-zA-Z_\$]\w*\s*(?=\()', TokenType.function_),
-    TokenRule(r'\b[A-Z][a-zA-Z0-9_]*\b', TokenType.type_),
-    TokenRule(r'\b[a-zA-Z_\$]\w*\b', TokenType.identifier),
-    TokenRule(r'[+\-*/%&|^~<>!=?:]+', TokenType.operator_),
-    TokenRule(r'[(){}\[\];,.]', TokenType.punctuation),
-  ];
+  MonarchRuleSet get monarchRules => MonarchRuleSet({
+    'root': [
+      MonarchRule(r'//.*', TokenType.comment),
+      MonarchRule(r'/[*]', TokenType.comment, next: const MonarchState('blockComment')),
+      MonarchRule(r'`', TokenType.string, next: const MonarchState('templateString')),
+      MonarchRule(r'"(?:[^"\\]|\\.)*"', TokenType.string),
+      MonarchRule(r"'(?:[^'\\]|\\.)*'", TokenType.string),
+      MonarchRule(r'\b0x[0-9a-fA-F]+n?\b', TokenType.number),
+      MonarchRule(r'\b\d+\.?\d*(?:[eE][+-]?\d+)?n?\b', TokenType.number),
+      MonarchRule(r'\b(?:async|await|break|case|catch|class|const|continue|debugger|default|delete|do|else|export|extends|false|finally|for|from|function|get|if|import|in|instanceof|let|new|null|of|return|set|static|super|switch|this|throw|true|try|typeof|undefined|var|void|while|with|yield)\b', TokenType.keyword),
+      MonarchRule(r'\b[a-zA-Z_$]\w*(?=\s*\()', TokenType.function_),
+      MonarchRule(r'\b[A-Z][a-zA-Z0-9_]*\b', TokenType.type_),
+      MonarchRule(r'\b[a-zA-Z_$]\w*\b', TokenType.identifier),
+      MonarchRule(r'[+\-*/%&|^~<>!=?:]+', TokenType.operator_),
+      MonarchRule(r'[(){}\[\];,.]', TokenType.punctuation),
+    ],
+    'blockComment': [
+      MonarchRule(r'[*]/', TokenType.comment, pop: true),
+      MonarchRule(r'[^*]+|[*](?!/)', TokenType.comment),
+    ],
+    'templateString': [
+      MonarchRule(r'`', TokenType.string, pop: true),
+      MonarchRule(r'[^`\\]+|\\[\s\S]', TokenType.string),
+    ],
+  });
 }

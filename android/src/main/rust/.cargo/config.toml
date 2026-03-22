@@ -1,0 +1,18 @@
+# .cargo/config.toml
+# Generated automatically by build_rust.bat / build_rust.sh
+# Or written dynamically by the Gradle buildRust task.
+# You can also fill this manually if your NDK is in a non-standard location.
+#
+# Example for Windows (adjust NDK path and API level):
+#
+# [target.aarch64-linux-android]
+# linker = "C:/Users/YOU/AppData/Local/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android21-clang.cmd"
+# ar     = "C:/Users/YOU/AppData/Local/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
+#
+# [target.armv7-linux-androideabi]
+# linker = "C:/Users/YOU/AppData/Local/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/windows-x86_64/bin/armv7a-linux-androideabi21-clang.cmd"
+# ar     = "C:/Users/YOU/AppData/Local/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
+#
+# [target.x86_64-linux-android]
+# linker = "C:/Users/YOU/AppData/Local/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/windows-x86_64/bin/x86_64-linux-android21-clang.cmd"
+# ar     = "C:/Users/YOU/AppData/Local/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"

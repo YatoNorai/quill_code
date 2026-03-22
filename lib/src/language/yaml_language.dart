@@ -1,27 +1,25 @@
 // lib/src/language/yaml_language.dart
 import '../highlighting/span.dart';
-import '_regex_language.dart';
-import '../tree_sitter/ts_language.dart';
+import 'monarch_language.dart';
 
-
-class YamlLanguage extends RegexLanguage with TsLanguageMixin {
-  @override
-  String get name => 'YAML';
-  @override
-  String get lineCommentPrefix => '#';
-  @override
-  String get tsName => 'yaml';
+class YamlLanguage extends MonarchLanguage {
+  @override String get name => 'YAML';
+  @override String get lineCommentPrefix => '#';
 
   @override
-  List<TokenRule> get rules => [
-    TokenRule(r'#.*', TokenType.comment),
-    TokenRule(r'"(?:[^"\\]|\\.)*"', TokenType.string),
-    TokenRule(r"'(?:[^'\\]|\\.)*'", TokenType.string),
-    TokenRule(r'\b(?:true|false|null|yes|no|on|off)\b', TokenType.keyword),
-    TokenRule(r'\b\d+\.?\d*\b', TokenType.number),
-    TokenRule(r'[a-zA-Z_][a-zA-Z0-9_-]*(?=\s*:)', TokenType.attrName),
-    TokenRule(r'[&*!|>%@]', TokenType.operator_),
-    TokenRule(r'[:{}\[\],]', TokenType.punctuation),
-    TokenRule(r'[a-zA-Z_][a-zA-Z0-9_-]*', TokenType.identifier),
-  ];
+  MonarchRuleSet get monarchRules => MonarchRuleSet({
+    'root': [
+      MonarchRule(r'#.*', TokenType.comment),
+      MonarchRule(r'---', TokenType.keyword),
+      MonarchRule(r'\.\.\.', TokenType.keyword),
+      MonarchRule(r'"(?:[^"\\]|\\.)*"', TokenType.string),
+      MonarchRule(r"'(?:[^'\\]|\\.)*'", TokenType.string),
+      MonarchRule(r'\b(?:true|false|null|yes|no|on|off)\b', TokenType.keyword),
+      MonarchRule(r'\b-?\d+\.?\d*\b', TokenType.number),
+      MonarchRule(r'^[\s]*[a-zA-Z_][\w\-]*(?=\s*:)', TokenType.attrName),
+      MonarchRule(r'[!&*][a-zA-Z_]\w*', TokenType.annotation),
+      MonarchRule(r'[{}\[\],:|>-]', TokenType.punctuation),
+      MonarchRule(r'[a-zA-Z_]\w*', TokenType.identifier),
+    ],
+  });
 }

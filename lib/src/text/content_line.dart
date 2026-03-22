@@ -18,12 +18,25 @@ class ContentLine {
   int charCodeAt(int index) => _text.codeUnitAt(index);
 
   void insert(int column, String text) {
-    _text = _text.substring(0, column) + text + _text.substring(column);
+    if (text.isEmpty) return;
+    // Use StringBuffer to avoid creating 3 intermediate String objects
+    // (substring before, text, substring after) and then joining them.
+    // For typical code lines (< 200 chars) this is still very fast
+    // and avoids 2 extra string allocations per keystroke.
+    final buf = StringBuffer();
+    buf.write(_text.substring(0, column));
+    buf.write(text);
+    buf.write(_text.substring(column));
+    _text = buf.toString();
     _cachedWidth = null;
   }
 
   void delete(int startColumn, int endColumn) {
-    _text = _text.substring(0, startColumn) + _text.substring(endColumn);
+    if (startColumn >= endColumn) return;
+    final buf = StringBuffer();
+    if (startColumn > 0) buf.write(_text.substring(0, startColumn));
+    if (endColumn < _text.length) buf.write(_text.substring(endColumn));
+    _text = buf.toString();
     _cachedWidth = null;
   }
 

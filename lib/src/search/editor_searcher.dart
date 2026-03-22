@@ -1,9 +1,11 @@
 // lib/src/search/editor_searcher.dart
 import 'dart:async';
+import 'dart:typed_data';
 import 'search_options.dart';
 import '../text/content.dart';
 import '../text/text_range.dart';
 import '../core/char_position.dart';
+import '../native/quill_native.dart';
 
 class EditorSearcher {
   final Content _content;
@@ -50,10 +52,27 @@ class EditorSearcher {
   Future<void> _execute() async {
     if (_currentPattern == null) return;
     final pattern = _currentPattern!;
-    final text = _content.fullText;
-    final results = await Future.microtask(
-        () => _findAll(text, pattern, _searchOptions));
-    _results = results;
+    final opts    = _searchOptions;
+    final text    = _content.fullText;
+
+    List<EditorRange>? results;
+
+    // Try Rust literal search (no regex, no heap on hot path)
+    final isLiteral = opts.type != SearchType.regularExpression;
+    if (isLiteral && QuillNative.isAvailable) {
+      final lineStarts = QuillNative.buildLineStarts(text);
+      results = QuillNative.searchLiteral(
+        text, pattern,
+        caseSensitive: opts.caseSensitive,
+        wholeWord:     opts.type == SearchType.wholeWord,
+        lineStarts:    lineStarts,
+      );
+    }
+
+    // Fallback to Dart regex for regex mode or if native unavailable
+    results ??= await Future.microtask(() => _findAll(text, pattern, opts));
+
+    _results = results!;
     _currentResultIndex = _results.isEmpty ? -1 : 0;
     if (!_resultsController.isClosed) _resultsController.add(_results);
   }

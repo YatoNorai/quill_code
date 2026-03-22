@@ -349,6 +349,9 @@ class EditorColorScheme {
       case 'namespace':    return namespace;
       case 'label':        return label;
       case 'punctuation':  return punctuation;
+      // BUG FIX: errorText and warningText were missing → fell back to textNormal
+      case 'errorText':    return problemError;
+      case 'warningText':  return problemWarning;
       default:             return textNormal;
     }
   }

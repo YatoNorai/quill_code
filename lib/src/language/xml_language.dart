@@ -1,24 +1,34 @@
 // lib/src/language/xml_language.dart
 import '../highlighting/span.dart';
-import '_regex_language.dart';
-import '../tree_sitter/ts_language.dart';
+import 'monarch_language.dart';
 
-
-class XmlLanguage extends RegexLanguage with TsLanguageMixin {
-  @override
-  String get name => 'XML';
-  @override
-  String get tsName => 'xml';
+class XmlLanguage extends MonarchLanguage {
+  @override String get name => 'XML';
+  @override String get lineCommentPrefix => '<!--';
 
   @override
-  List<TokenRule> get rules => [
-    TokenRule(r'<!--[\s\S]*?-->', TokenType.comment),
-    TokenRule(r'<\?[\s\S]*?\?>', TokenType.preprocessor),
-    TokenRule(r'</?[a-zA-Z:_][a-zA-Z0-9:._-]*', TokenType.htmlTag),
-    TokenRule(r'\b[a-zA-Z:_][a-zA-Z0-9:._-]*(?=\s*=)', TokenType.attrName),
-    TokenRule(r'"[^"]*"', TokenType.attrValue),
-    TokenRule(r"'[^']*'", TokenType.attrValue),
-    TokenRule(r'[<>/="!]', TokenType.operator_),
-    TokenRule(r'&[a-zA-Z]+;', TokenType.literal),
-  ];
+  MonarchRuleSet get monarchRules => MonarchRuleSet({
+    'root': [
+      MonarchRule(r'<!--', TokenType.comment, next: const MonarchState('comment')),
+      MonarchRule(r'<\?[^?]*\?>', TokenType.preprocessor),
+      MonarchRule(r'<![^>]+>', TokenType.preprocessor),
+      MonarchRule(r'<[/]?[a-zA-Z][\w.-]*', TokenType.htmlTag,
+          next: const MonarchState('tag')),
+      MonarchRule(r'&[a-zA-Z]+;|&#\d+;', TokenType.literal),
+      MonarchRule(r'[^<&]+', TokenType.normal),
+    ],
+    'tag': [
+      MonarchRule(r'/>', TokenType.punctuation, pop: true),
+      MonarchRule(r'>', TokenType.punctuation, pop: true),
+      MonarchRule(r'[a-zA-Z_:][\w:.-]*\s*(?==)', TokenType.attrName),
+      MonarchRule(r'"[^"]*"', TokenType.attrValue),
+      MonarchRule(r"'[^']*'", TokenType.attrValue),
+      MonarchRule(r'=', TokenType.operator_),
+      MonarchRule(r'\s+', TokenType.normal),
+    ],
+    'comment': [
+      MonarchRule(r'-->', TokenType.comment, pop: true),
+      MonarchRule(r'[^-]+|-(?!->)', TokenType.comment),
+    ],
+  });
 }

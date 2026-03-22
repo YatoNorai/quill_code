@@ -11,6 +11,11 @@ abstract class AnalyzeManager {
   Styles _styles = Styles.empty;
   Styles get styles => _styles;
 
+  // Viewport hint: set by the render object on every paint so the manager
+  // can limit highlight work to visible lines only (Monaco-style).
+  int viewportFirstLine = 0;
+  int viewportLastLine  = 9999;
+
   void init(Content content);
   void onContentChanged(ContentChangeEvent event, Content content);
   void reanalyze(Content content);

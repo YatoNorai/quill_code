@@ -1,0 +1,18 @@
+[package]
+name    = "quill_perf"
+version = "0.1.0"
+edition = "2021"
+
+# Compile as a C-compatible static library linked into libquill_ts.so
+[lib]
+name      = "quill_perf"
+crate-type = ["staticlib"]
+
+[profile.release]
+opt-level  = 3
+lto        = "thin"
+codegen-units = 1
+panic      = "abort"    # smaller binary, no unwinding runtime on Android
+
+[profile.dev]
+panic = "abort"

@@ -138,6 +138,9 @@ class CodeEditorRenderObject extends RenderBox {
 
     final firstLine = (scrollY / _lh).floor().clamp(0, lineCount - 1);
     final lastLine = ((scrollY + viewH) / _lh).ceil().clamp(0, lineCount - 1);
+    // BUG FIX: propagate visible viewport to the analyze manager so it can
+    // limit tree-sitter highlight() calls to only the visible range.
+    _controller.updateViewport(firstLine, lastLine);
 
     // 1. Background
     _bgPaint.color = cs.background;

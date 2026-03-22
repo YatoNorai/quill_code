@@ -39,7 +39,9 @@ import 'code_block.dart';
 import '../text/content.dart';
 import '../language/language.dart';
 import '../language/_regex_language.dart';
+import '../language/monarch_language.dart';
 import '../highlighting/span.dart';
+import '../native/quill_native.dart';
 
 // Lines tokenised synchronously on init.
 const int _kVisible = 120;
@@ -162,6 +164,8 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
 
   // ── Isolate setup ─────────────────────────────────────────────────────────
 
+  bool get _isMonarch => language is MonarchLanguage;
+
   IsolateTokenizer _getOrCreateIso() {
     if (_iso != null) return _iso!;
     _iso = IsolateTokenizer(onSpans: _onIsoSpans, onBlocks: _onIsoBlocks);
@@ -233,9 +237,10 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
     final content = _content;
     if (content == null) return;
 
-    // O(n) on UI thread — ~2–5 ms for 20 k lines in release mode.
-    // Acceptable: runs at most once per edited frame (flag prevents double-fire).
-    final blocks = _extractCodeBlocksUI(content);
+    // Try Rust path first (zero UI-thread alloc, ~0.3 ms for 20k lines).
+    // Falls back to Dart _extractCodeBlocksUI if native unavailable.
+    final rustBlocks = QuillNative.extractBlocks(content);
+    final blocks = rustBlocks ?? _extractCodeBlocksUI(content);
     _currentBlocks = blocks;
     // Bug 1 fix: remove EOF-ghost blocks (unclosed { with no matching }).
     // _extractCodeBlocksUI keeps unmatched openers as blocks ending at EOF;
@@ -287,6 +292,26 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
     }
 
     final lines = List<String>.generate(lineCount, content.getLineText);
+
+    // MonarchLanguage: stateful tokenizer runs directly — no isolate needed.
+    // The isolate tokenizer is stateless and cannot handle cross-line state
+    // (block comments, multiline strings). Monaco solves this identically:
+    // tokenize on the UI thread with early-exit when state stabilises.
+    if (_isMonarch) {
+      final spans = language.tokenize(lines);
+      _partialSpans = spans.length == lineCount
+          ? List<List<CodeSpan>>.unmodifiable(spans)
+          : _partialSpans;
+      final blocks = _extractCodeBlocksUI(content);
+      _currentBlocks = blocks;
+      pushStyles(Styles(
+        spans:      List<List<CodeSpan>>.unmodifiable(_partialSpans!),
+        codeBlocks: _currentBlocks,
+      ));
+      onTokenizationComplete?.call();
+      return;
+    }
+
     _getOrCreateIso().tokenize(lines, version);
   }
 
@@ -354,6 +379,15 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
     _jobVersion  = version;
     _jobNext     = start;
     _jobStart    = start;
+
+    // MonarchLanguage: re-run full stateful tokenize from the changed line.
+    // This is fast because MonarchEngine.reTokenize stops early when state
+    // stabilises — same optimization Monaco uses.
+    if (_isMonarch) {
+      _dispatchFull(_content!);
+      return;
+    }
+
     _scheduleFrame();
   }
 
@@ -382,12 +416,31 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
       ));
     });
 
-    // Full tokenisation + block extraction via isolate.
-    // Call tokenize() directly (not _dispatchFull) so we don't double-increment
-    // _currentVersion — the frame callback above uses `version`.
+    // Full tokenisation + block extraction.
+    // MonarchLanguage: stateful, runs on UI thread (like Monaco).
+    // RegexLanguage: uses isolate for background processing.
     if (lineCount > 0) {
-      final lines = List<String>.generate(lineCount, content.getLineText);
-      _getOrCreateIso().tokenize(lines, version);
+      if (_isMonarch) {
+        // Already tokenized visN lines synchronously above.
+        // Now finish the rest and extract blocks.
+        final lines = List<String>.generate(lineCount, content.getLineText);
+        final spans = language.tokenize(lines);
+        for (int i = 0; i < math.min(spans.length, lineCount); i++) {
+          allSpans[i] = spans[i];
+        }
+        _currentBlocks = _extractCodeBlocksUI(content);
+        SchedulerBinding.instance.addPostFrameCallback((_) {
+          if (_destroyed || _currentVersion != version) return;
+          pushStyles(Styles(
+            spans:      List<List<CodeSpan>>.unmodifiable(allSpans),
+            codeBlocks: _currentBlocks,
+          ));
+          onTokenizationComplete?.call();
+        });
+      } else {
+        final lines = List<String>.generate(lineCount, content.getLineText);
+        _getOrCreateIso().tokenize(lines, version);
+      }
     }
   }
 

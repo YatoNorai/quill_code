@@ -144,9 +144,14 @@ class TsAnalyzeManager extends AnalyzeManager {
     }
     if (version != _pendingVersion) { debugPrint('[TS] version mismatch, aborting'); return; }
 
-    final spans  = parser.highlight(source);
+    // BUG FIX: limit highlight to visible viewport + 150-line buffer above/below.
+    // Previously called with no range → processed the ENTIRE file on every keystroke,
+    // causing the editor to freeze on large files (same fix Monaco applies).
+    final vFirst = (viewportFirstLine - 150).clamp(0, 0x7FFFFFFF);
+    final vLast  = (viewportLastLine  + 150).clamp(0, 0x7FFFFFFF);
+    final spans  = parser.highlight(source, startRow: vFirst, endRow: vLast);
     final blocks = parser.extractBlocks();
-    debugPrint('[TS] highlight: ${spans.length} spans, ${blocks.length} blocks');
+    debugPrint('[TS] highlight: ${spans.length} spans (rows $vFirst–$vLast), ${blocks.length} blocks');
     final lineStarts  = _buildLineStarts(source);
     final lineCount   = source.split('\n').length;
     final spansByLine = <int, List<CodeSpan>>{};
@@ -159,10 +164,17 @@ class TsAnalyzeManager extends AnalyzeManager {
         spansByLine.putIfAbsent(sLC.$1, () => [])
             .add(CodeSpan(column: sLC.$2, type: sp.type));
       } else {
-        // Multi-line: add one entry per covered line
+        // Multi-line span: add one entry per covered line.
+        // BUG FIX: also insert a TokenType.normal sentinel at eLC.$2 on the
+        // last line so the renderer stops coloring at the correct column instead
+        // of running the token color to the end of the line or into the next token.
         for (int ln = sLC.$1; ln <= eLC.$1; ln++) {
-          spansByLine.putIfAbsent(ln, () => [])
-              .add(CodeSpan(column: ln == sLC.$1 ? sLC.$2 : 0, type: sp.type));
+          final col = ln == sLC.$1 ? sLC.$2 : 0;
+          spansByLine.putIfAbsent(ln, () => []).add(CodeSpan(column: col, type: sp.type));
+          if (ln == eLC.$1 && eLC.$2 > 0) {
+            // Sentinel: resets to normal at the end column of the multi-line token.
+            spansByLine[ln]!.add(CodeSpan(column: eLC.$2, type: TokenType.normal));
+          }
         }
       }
     }
