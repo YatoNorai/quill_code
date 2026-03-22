@@ -61,7 +61,7 @@ mkdir -p "$CPP_DIR"
 clone_or_update \
   "https://github.com/tree-sitter/tree-sitter.git" \
   "$CPP_DIR/tree-sitter" \
-  "v0.22.6"
+  "v0.26.7"
 
 # ── Grammars ──────────────────────────────────────────────────────────────────
 GRAM="$CPP_DIR/grammars"
