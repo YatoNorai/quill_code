@@ -15,6 +15,7 @@ export 'src/text/rope.dart';
 
 export 'src/diff/git_diff.dart';
 
+
 export 'src/language/language.dart';
 export 'src/language/plain_text_language.dart';
 export 'src/language/dart_language.dart';
