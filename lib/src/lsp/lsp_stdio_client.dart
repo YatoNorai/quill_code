@@ -35,6 +35,7 @@ class LspStdioClient implements LspClient {
   final _diagCtrl = StreamController<Map<String, dynamic>>.broadcast();
   int  _nextId    = 1;
   bool _ready     = false;
+  Future<void> _writeQueue = Future.value();
 
   LspStdioClient._({
     required this.executable,
@@ -133,22 +134,27 @@ class LspStdioClient implements LspClient {
     final id        = _nextId++;
     final completer = Completer<Map<String, dynamic>>();
     _pending[id]    = completer;
-    _write({'jsonrpc': '2.0', 'id': id, 'method': method, 'params': params});
+    await _write({'jsonrpc': '2.0', 'id': id, 'method': method, 'params': params});
     return completer.future.timeout(
       const Duration(seconds: 10),
       onTimeout: () { _pending.remove(id); return {}; },
     );
   }
 
-  void _sendNotification(String method, Map<String, dynamic> params) {
-    _write({'jsonrpc': '2.0', 'method': method, 'params': params});
+  Future<void> _sendNotification(String method, Map<String, dynamic> params) {
+    return _write({'jsonrpc': '2.0', 'method': method, 'params': params});
   }
 
-  void _write(Map<String, dynamic> msg) {
-    final body   = utf8.encode(jsonEncode(msg));
-    final header = utf8.encode('Content-Length: ${body.length}\r\n\r\n');
-    _process.stdin.add([...header, ...body]);
-    _process.stdin.flush();
+  // Serialises all writes through a queue so concurrent callers never race
+  // on stdin — IOSink.flush() binds the sink via addStream() internally and
+  // throws "StreamSink is bound to a stream" if add() is called mid-flush.
+  Future<void> _write(Map<String, dynamic> msg) {
+    return _writeQueue = _writeQueue.then((_) async {
+      final body   = utf8.encode(jsonEncode(msg));
+      final header = utf8.encode('Content-Length: ${body.length}\r\n\r\n');
+      _process.stdin.add([...header, ...body]);
+      await _process.stdin.flush();
+    }).catchError((e) => debugPrint('[LSP] write error: $e'));
   }
 
   // ── Initialize ────────────────────────────────────────────────────────────
@@ -177,7 +183,7 @@ class LspStdioClient implements LspClient {
       ],
     });
     if (result.isNotEmpty) {
-      _sendNotification('initialized', {});
+      await _sendNotification('initialized', {});
       _ready = true;
     }
   }
@@ -528,7 +534,7 @@ class LspStdioClient implements LspClient {
     if (!_ready) return;
     _ready = false;
     await _sendRequest('shutdown', {});
-    _sendNotification('exit', {});
+    await _sendNotification('exit', {});
     _process.kill();
     _cleanup();
   }
