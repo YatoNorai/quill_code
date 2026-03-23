@@ -100,15 +100,6 @@ class _CompletionPopupState extends State<CompletionPopup> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Loading bar — appears at top while LSP is in-flight
-                  if (loading)
-                    SizedBox(
-                      height: 2,
-                      child: LinearProgressIndicator(
-                        backgroundColor: cs.completionBackground,
-                        valueColor: AlwaysStoppedAnimation<Color>(cs.completionTextMatched),
-                      ),
-                    ),
                   if (items.isNotEmpty)
                     Flexible(
                       child: ListView.builder(
@@ -152,15 +143,6 @@ class _CompletionPopupState extends State<CompletionPopup> {
                                       ],
                                     ),
                                   ),
-                                  // Resolve spinner for unresolved items
-                                  if (selected && !item.isResolved)
-                                    SizedBox(
-                                      width: 10, height: 10,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 1.5,
-                                        valueColor: AlwaysStoppedAnimation<Color>(cs.completionTextMatched),
-                                      ),
-                                    ),
                                   if (item.isSnippet)
                                     Container(
                                       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),

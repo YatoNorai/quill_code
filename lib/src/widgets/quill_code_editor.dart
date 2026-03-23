@@ -1694,21 +1694,21 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
                     final usableH = _vpSize.height - kbH;
                     final minimapW = ctrl.props.showMinimap ? _minimapWidth + pad : 0.0;
                     final availW  = _vpSize.width - minimapW - pad * 2;
-                    // Vertical: ALWAYS prefer above the cursor line.
-                    // Fall back to below only when there is more room there.
-                    // NEVER floor-clamp to 0 — that pushes the popup back onto the cursor.
-                    final cursorBottom = pos.dy + _lh;
+                    // _charToLocal returns (eff+1)*_lh - sY, i.e. the BOTTOM of the
+                    // cursor line. Derive top so we never overlap the cursor itself.
+                    final cursorTop    = pos.dy - _lh;     // top edge of cursor line
+                    final cursorBottom = pos.dy;           // bottom edge of cursor line
                     final spaceBelow   = usableH - cursorBottom - pad;
-                    final spaceAbove   = pos.dy - pad;
+                    final spaceAbove   = cursorTop - pad;
                     double top;
                     if (spaceAbove >= popupH) {
-                      top = pos.dy - popupH - pad;         // fits above (preferred)
+                      top = cursorTop - popupH - pad;      // fits above (preferred)
                     } else if (spaceBelow >= popupH) {
                       top = cursorBottom + pad;            // fits below (fallback)
                     } else if (spaceAbove >= spaceBelow) {
-                      top = pos.dy - popupH - pad;         // more room above — may clip off screen top
+                      top = (cursorTop - popupH - pad).clamp(0.0, double.maxFinite);
                     } else {
-                      top = cursorBottom + pad;            // more room below — may clip off screen bottom
+                      top = cursorBottom + pad;            // more room below
                     }
                     // Horizontal: align to cursor, clamp so it never overflows right
                     final left = pos.dx.clamp(pad, math.max(pad, availW - popupW)).toDouble();
@@ -1729,6 +1729,11 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
                   builder: (_, __, ___) {
                     if (ctrl.props.readOnly) return const SizedBox.shrink();
                     if (ctrl.cursor.hasSelection) return const SizedBox.shrink();
+                    // Never show diagnostic tooltip at the same time as completion popup
+                    if (ctrl.isCompletionVisible ||
+                        (ctrl.isCompletionLoading && ctrl.completionItems.isEmpty)) {
+                      return const SizedBox.shrink();
+                    }
                     final diag = ctrl.diagnostics.atPosition(ctrl.cursor.position);
                     if (diag == null) return const SizedBox.shrink();
                     return _diagTooltip(diag, ctrl.cursor.position, theme, cs);
@@ -2416,19 +2421,20 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     final kbH = MediaQuery.of(context).viewInsets.bottom;
     final usableH = _vpSize.height - kbH;
     final minimapW = widget.controller.props.showMinimap ? _minimapWidth + pad : 0.0;
-    final cursorBottom = lp.dy + _lh;
+    // _charToLocal returns (eff+1)*_lh - sY, i.e. the BOTTOM of the cursor line.
+    final cursorTop    = lp.dy - _lh;   // top edge of cursor line
+    final cursorBottom = lp.dy;         // bottom edge of cursor line
     final spaceBelow   = usableH - cursorBottom - pad;
-    final spaceAbove   = lp.dy - pad;
+    final spaceAbove   = cursorTop - pad;
     double top;
     if (spaceBelow >= ovH) {
-      top = cursorBottom + pad;
+      top = cursorBottom + pad;          // preferred: below cursor
     } else if (spaceAbove >= ovH) {
-      top = lp.dy - ovH - pad;
+      top = cursorTop - ovH - pad;       // fallback: above cursor
     } else if (spaceBelow >= spaceAbove) {
       top = cursorBottom + pad;
     } else {
-      top = lp.dy - ovH - pad;
-      if (top < pad) top = pad;
+      top = (cursorTop - ovH - pad).clamp(pad, double.maxFinite);
     }
     final maxTop = usableH - ovH - pad;
     if (top > maxTop && maxTop >= pad) top = maxTop;

@@ -97,11 +97,17 @@ class DiagnosticsContainer {
       _regions.where((r) => r.range.start.line == line).toList();
 
   /// Returns the first diagnostic whose range contains [pos], or null.
+  ///
+  /// The tooltip must only appear when the cursor is **inside** the error
+  /// span — i.e. there are still characters after the cursor that belong to
+  /// the squiggle.  When the cursor sits exactly at the end column the user
+  /// has moved past the error token, so we return null.
   DiagnosticRegion? atPosition(CharPosition pos) {
     for (final r in _regions) {
       if (r.range.start.line == pos.line) {
+        // cursor must be >= start AND strictly < end (not at or past the end)
         if (pos.column >= r.range.start.column &&
-            pos.column <= r.range.end.column) {
+            pos.column < r.range.end.column) {
           return r;
         }
       }
