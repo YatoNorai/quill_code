@@ -4,6 +4,7 @@
 // Returns null if no bracket is adjacent to the cursor,
 // or if the bracket is unmatched.
 import 'content.dart';
+import '../native/quill_native.dart';
 import 'text_range.dart';
 import '../core/char_position.dart';
 
@@ -24,6 +25,16 @@ class BracketMatcher {
   /// Find the matching bracket pair adjacent to [cursor].
   /// Checks: cursor is at (left of) an opener, or right of a closer.
   static BracketPair? findPair(Content content, CharPosition cursor) {
+    // Try Rust path first — O(n) per line (one-pass string state), vs
+    // the Dart path which was O(col * lineLen) due to _inString rescanning.
+    final native = QuillNative.bracketMatch(content, cursor.line, cursor.column);
+    if (native != null) {
+      return BracketPair(
+        open:  CharPosition(native[0], native[1]),
+        close: CharPosition(native[2], native[3]),
+      );
+    }
+
     final line = content.getLineText(cursor.line);
     final col  = cursor.column;
 

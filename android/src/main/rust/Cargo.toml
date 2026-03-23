@@ -3,16 +3,16 @@ name    = "quill_perf"
 version = "0.1.0"
 edition = "2021"
 
-# Compile as a C-compatible static library linked into libquill_ts.so
 [lib]
-name      = "quill_perf"
+name       = "quill_perf"
 crate-type = ["staticlib"]
 
 [profile.release]
-opt-level  = 3
-lto        = "thin"
+opt-level     = 3
+lto           = "thin"
 codegen-units = 1
-panic      = "abort"    # smaller binary, no unwinding runtime on Android
+# panic=abort removed: with std on Android, default panic handling works fine
+# and avoids the need for a custom #[panic_handler]
 
 [profile.dev]
-panic = "abort"
+# dev builds: keep defaults for better error messages

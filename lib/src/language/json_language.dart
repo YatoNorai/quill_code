@@ -1,20 +1,20 @@
 // lib/src/language/json_language.dart
 import '../highlighting/span.dart';
-import 'monarch_language.dart';
+import '_regex_language.dart';
+import '../tree_sitter/ts_language.dart';
 
-class JsonLanguage extends MonarchLanguage {
-  @override String get name => 'JSON';
-  @override String get lineCommentPrefix => '//';
+
+class JsonLanguage extends RegexLanguage with TsLanguageMixin {
+  @override
+  String get name => 'JSON';
+  @override
+  String get tsName => 'json';
 
   @override
-  MonarchRuleSet get monarchRules => MonarchRuleSet({
-    'root': [
-      MonarchRule(r'"(?:[^"\\]|\\.)*"\s*(?=:)', TokenType.attrName),
-      MonarchRule(r'"(?:[^"\\]|\\.)*"', TokenType.string),
-      MonarchRule(r'\b-?\d+\.?\d*(?:[eE][+-]?\d+)?\b', TokenType.number),
-      MonarchRule(r'\b(?:true|false|null)\b', TokenType.keyword),
-      MonarchRule(r'[{}\[\]]', TokenType.punctuation),
-      MonarchRule(r'[,:]', TokenType.punctuation),
-    ],
-  });
+  List<TokenRule> get rules => [
+    TokenRule(r'"(?:[^"\\]|\\.)*"', TokenType.string),
+    TokenRule(r'\b(?:true|false|null)\b', TokenType.keyword),
+    TokenRule(r'-?\d+\.?\d*(?:[eE][+-]?\d+)?', TokenType.number),
+    TokenRule(r'[{}\[\]:,]', TokenType.punctuation),
+  ];
 }

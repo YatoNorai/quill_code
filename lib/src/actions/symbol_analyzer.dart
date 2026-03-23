@@ -2,6 +2,7 @@
 // Extracts symbol info and definition locations from the current document.
 // Purely regex-based (no AST), works offline.
 import 'code_action.dart';
+import '../native/quill_native.dart';
 import '../core/char_position.dart';
 import '../text/content.dart';
 import '../text/text_range.dart';
@@ -37,6 +38,28 @@ class SymbolAnalyzer {
 
   /// Scan the document and find all top-level symbol declarations.
   static List<SymbolInfo> extractSymbols(Content content) {
+    // Try Rust path: pure string scan, no regex engine
+    final native = QuillNative.symbolScan(content);
+    if (native != null) {
+      return native.map((q) {
+        final li = q[0]; final cs = q[1]; final ce = q[2]; final kind = q[3];
+        final line = content.getLineText(li);
+        final name = line.substring(cs.clamp(0, line.length), ce.clamp(0, line.length));
+        final sk = kind == 0 ? SymbolKind.class_
+                 : kind == 1 ? SymbolKind.mixin_
+                 : kind == 2 ? SymbolKind.extension_
+                 : kind == 3 ? SymbolKind.enum_
+                 : kind == 4 ? SymbolKind.function_
+                 :              SymbolKind.variable;
+        return SymbolInfo(
+          name: name, kind: sk,
+          nameRange: EditorRange(CharPosition(li, cs), CharPosition(li, ce)),
+          definedAtLine: li,
+          signature: line.trim(),
+        );
+      }).toList();
+    }
+    // Dart fallback (regex-based)
     final results = <SymbolInfo>[];
     for (int i = 0; i < content.lineCount; i++) {
       final line = content.getLineText(i);

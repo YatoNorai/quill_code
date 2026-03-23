@@ -1,0 +1,3 @@
+D:/apps/quill_code/android/.cxx/Release/4k2a3v1h/x86_64/CMakeFiles/quill_perf.dir
+D:/apps/quill_code/android/.cxx/Release/4k2a3v1h/x86_64/CMakeFiles/edit_cache.dir
+D:/apps/quill_code/android/.cxx/Release/4k2a3v1h/x86_64/CMakeFiles/rebuild_cache.dir

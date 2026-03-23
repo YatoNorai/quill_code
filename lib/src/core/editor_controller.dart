@@ -584,13 +584,6 @@ class QuillCodeController extends ChangeNotifier {
       // Cost: ~30 visible lines × 0.1 ms = ~3 ms per update — acceptable.
       tokenizationVersion.value++;
     };
-  /// Called by the render object every frame with the currently visible line range.
-  /// Propagates to the AnalyzeManager so tree-sitter only processes visible lines.
-  void updateViewport(int firstLine, int lastLine) {
-    _analyzeManager.viewportFirstLine = firstLine;
-    _analyzeManager.viewportLastLine  = lastLine;
-  }
-
     _analyzeManager.onTokenizationComplete = () {
       // tokenizationVersion already bumped in onStylesUpdated above.
     };

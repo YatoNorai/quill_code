@@ -1,4 +1,5 @@
 // lib/src/language/_regex_language.dart
+import '../native/quill_native.dart';
 import '../highlighting/span.dart';
 import '../highlighting/analyze_manager.dart';
 import '../highlighting/incremental_analyze_manager.dart';
@@ -126,12 +127,10 @@ abstract class RegexLanguage extends QuillLanguage {
   }
 
   @override
-  int getIndentAdvance(Content content, int line, int column) {
+  int getIndentAdvance(content, line, column) {
     if (line < 0) return 0;
-    final t = content.getLineText(line).trimRight();
-    if (t.endsWith('{') || t.endsWith('(') ||
-        t.endsWith('[') || t.endsWith(':')) return 4;
-    return 0;
+    final t = content.getLineText(line);
+    return QuillNative.indentAdvance(t);
   }
 
   String _prefix(String line, int col) {

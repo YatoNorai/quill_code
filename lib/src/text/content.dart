@@ -1,5 +1,6 @@
 // lib/src/text/content.dart
 import 'content_line.dart';
+import '../native/quill_native.dart';
 import 'rope.dart';
 import 'text_range.dart';
 import 'undo_manager.dart';
@@ -270,6 +271,14 @@ class Content {
 
   String get fullText {
     if (_documentVersion == _cachedFullTextVersion) return _cachedFullText;
+    // Try Rust path: single memcpy pass, no StringBuffer allocs
+    final rust = QuillNative.fulltextJoin(this);
+    if (rust != null) {
+      _cachedFullText = rust;
+      _cachedFullTextVersion = _documentVersion;
+      return _cachedFullText;
+    }
+    // Dart fallback
     final buf = StringBuffer();
     final n = lineCount;
     for (int i = 0; i < n; i++) {

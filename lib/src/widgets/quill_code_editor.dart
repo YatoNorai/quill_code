@@ -55,6 +55,7 @@ import '../lsp/lsp_hover_panel.dart';
 import '../lsp/lsp_signature_panel.dart';
 import '../lsp/quill_lsp_config.dart';
 import '../lsp/lsp_stdio_client.dart';
+import '../native/quill_native.dart';
 import '../lsp/lsp_socket_client.dart';
 import '../completion/vscode_snippets.dart';
 
@@ -3350,16 +3351,16 @@ class _EditorViewport extends LeafRenderObjectWidget {
   /// Strips the trailing block-opener character(s) from a fold's startLine text
   /// so the fold indicator reads "void main()  •••" instead of "void main() {  •••".
   /// Removes the last '{', '(' or ':' and any surrounding whitespace.
-  static String _stripFoldOpener(String txt) {
+  static String _stripFoldOpener(String txt) =>
+      QuillNative.stripFoldOpener(txt) ?? _stripFoldOpenerDart(txt);
+
+  static String _stripFoldOpenerDart(String txt) {
     int end = txt.length - 1;
-    // Skip trailing whitespace
     while (end >= 0 && (txt.codeUnitAt(end) == 32 || txt.codeUnitAt(end) == 9)) end--;
     if (end < 0) return txt;
     final last = txt.codeUnitAt(end);
-    // 123={  40=(  58=:
     if (last == 123 || last == 40 || last == 58) {
-      end--; // remove the opener char
-      // Also strip any whitespace before it
+      end--;
       while (end >= 0 && (txt.codeUnitAt(end) == 32 || txt.codeUnitAt(end) == 9)) end--;
       return end < 0 ? '' : txt.substring(0, end + 1);
     }

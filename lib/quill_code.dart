@@ -15,7 +15,6 @@ export 'src/text/rope.dart';
 
 export 'src/diff/git_diff.dart';
 
-
 export 'src/language/language.dart';
 export 'src/language/plain_text_language.dart';
 export 'src/language/dart_language.dart';
@@ -52,6 +51,9 @@ export 'src/lsp/lsp_signature_panel.dart';
 export 'src/lsp/quill_lsp_config.dart';
 
 export 'src/search/editor_searcher.dart';
+
+// Native Rust acceleration bridge (optional — graceful fallback to Dart)
+export 'src/native/quill_native.dart';
 export 'src/search/search_options.dart';
 
 export 'src/diagnostics/diagnostic_region.dart';

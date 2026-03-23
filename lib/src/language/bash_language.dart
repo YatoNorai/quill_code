@@ -1,32 +1,39 @@
 // lib/src/language/bash_language.dart
 import '../highlighting/span.dart';
-import 'monarch_language.dart';
+import '_regex_language.dart';
+import '../tree_sitter/ts_language.dart';
 
-class BashLanguage extends MonarchLanguage {
-  @override String get name => 'Bash';
-  @override String get lineCommentPrefix => '#';
 
-  static const _kw = [
-    'if','then','else','elif','fi','for','while','do','done','case','esac',
-    'function','return','in','select','until','break','continue','exit',
-    'declare','local','readonly','export','source','alias','unset',
-  ];
-  @override List<String> get completionKeywords => _kw;
+class BashLanguage extends RegexLanguage with TsLanguageMixin {
+  @override
 
   @override
-  MonarchRuleSet get monarchRules => MonarchRuleSet({
-    'root': [
-      MonarchRule(r'#!.*', TokenType.comment),
-      MonarchRule(r'#.*', TokenType.comment),
-      MonarchRule(r'"(?:[^"\\$]|\\.)*"', TokenType.string),
-      MonarchRule(r"'[^']*'", TokenType.string),
-      MonarchRule(r'\b(?:if|then|else|elif|fi|for|while|do|done|case|esac|function|return|in|select|until|break|continue|exit|declare|local|readonly|export|source|alias|unset)\b', TokenType.keyword),
-      MonarchRule(r'\$[{(]?[a-zA-Z_]\w*[})]?', TokenType.identifier),
-      MonarchRule(r'\b\d+\b', TokenType.number),
-      MonarchRule(r'[a-zA-Z_]\w*(?=\s*\()', TokenType.function_),
-      MonarchRule(r'[a-zA-Z_]\w*', TokenType.identifier),
-      MonarchRule(r'[|&;<>!\-=+*/%]', TokenType.operator_),
-      MonarchRule(r'[(){}\[\];,]', TokenType.punctuation),
-    ],
-  });
+  String get lineCommentPrefix => '#';
+  String get name => 'Bash';
+  @override
+  String get tsName => 'bash';
+
+  static const _kw = [
+    'if','then','else','elif','fi','case','esac','for','while','until',
+    'do','done','in','function','select','time','return','break','continue',
+    'exit','local','export','declare','typeset','readonly','unset','set',
+    'shift','source','eval','exec',
+  ];
+
+  @override
+  List<String> get completionKeywords => _kw;
+
+  @override
+  List<TokenRule> get rules => [
+    TokenRule(r'#.*', TokenType.comment),
+    TokenRule(r'"(?:[^"\\]|\\.)*"', TokenType.string),
+    TokenRule(r"'[^']*'", TokenType.string),
+    TokenRule(r'\$\{[^}]*\}', TokenType.identifier),
+    TokenRule(r'\$\w+', TokenType.identifier),
+    TokenRule(r'\b(?:if|then|else|elif|fi|case|esac|for|while|until|do|done|in|function|select|time|return|break|continue|exit|local|export|declare|typeset|readonly|unset|set|shift|source|eval|exec)\b', TokenType.keyword),
+    TokenRule(r'\b\d+\b', TokenType.number),
+    TokenRule(r'[a-zA-Z_]\w*\s*(?=\()', TokenType.function_),
+    TokenRule(r'[a-zA-Z_]\w*', TokenType.identifier),
+    TokenRule(r'[|&;<>(){}]', TokenType.operator_),
+  ];
 }
