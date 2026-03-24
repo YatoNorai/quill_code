@@ -57,9 +57,8 @@ class _CompletionPopupState extends State<CompletionPopup> {
     final cs = widget.theme.colorScheme;
     final ctrl = widget.controller;
     final items = ctrl.completionItems;
-    final loading = ctrl.isCompletionLoading;
 
-    if (items.isEmpty && !loading) return const SizedBox.shrink();
+    if (items.isEmpty) return const SizedBox.shrink();
 
     final selectedItem = (widget.selectedIndex >= 0 && widget.selectedIndex < items.length)
         ? items[widget.selectedIndex]

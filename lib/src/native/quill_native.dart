@@ -67,6 +67,11 @@ typedef _HasStructCharDart   = int Function(Pointer<Uint8>, int);
 typedef _StripFoldNative = Int32 Function(Pointer<Uint8>, Int32, Pointer<Uint8>, Int32);
 typedef _StripFoldDart   = int Function(Pointer<Uint8>, int, Pointer<Uint8>, int);
 
+typedef _ExtractBlocksFlatNative = Int32 Function(
+    Pointer<Uint8>, Int32, Pointer<Int32>, Int32);
+typedef _ExtractBlocksFlatDart = int Function(
+    Pointer<Uint8>, int, Pointer<Int32>, int);
+
 typedef _ValidateBlocksNative = Int32 Function(
     Pointer<Pointer<Uint8>>, Pointer<Int32>, Int32, Pointer<Int32>, Int32);
 typedef _ValidateBlocksDart = int Function(
@@ -103,8 +108,9 @@ class QuillNative {
   /// Used by IncrementalAnalyzeManager for zero-overhead per-line tokenization.
   static _TokenizeLineDart? get tokenizeLineRaw => _i._tokenizeLine; // triggers _init() via lazy getter
 
-  _ExtractBlocksDart?   _extractBlocks;
-  _SearchDart?          _search;
+  _ExtractBlocksDart?      _extractBlocks;
+  _ExtractBlocksFlatDart?  _extractBlocksFlat;
+  _SearchDart?             _search;
   _BuildLineStartsDart? _buildLineStarts;
   _MaxLineLengthDart?   _maxLineLength;
   _BracketMatchDart?    _bracketMatch;
@@ -126,6 +132,8 @@ class QuillNative {
 
       _extractBlocks = lib.lookupFunction<_ExtractBlocksNative, _ExtractBlocksDart>(
           'quill_extract_blocks');
+      _extractBlocksFlat = lib.lookupFunction<_ExtractBlocksFlatNative, _ExtractBlocksFlatDart>(
+          'quill_extract_blocks_flat');
       _search = lib.lookupFunction<_SearchNative, _SearchDart>(
           'quill_search');
       _buildLineStarts = lib.lookupFunction<_BuildLineStartsNative, _BuildLineStartsDart>(
@@ -195,6 +203,40 @@ class QuillNative {
 
       final count = inst._extractBlocks!(
           ptrs.cast(), lengths, n, outBuf, maxBlocks * 3);
+
+      if (count < 0) return null;
+
+      final blocks = <CodeBlock>[];
+      for (int i = 0; i < count; i++) {
+        blocks.add(CodeBlock(
+          startLine: outBuf[i * 3],
+          endLine:   outBuf[i * 3 + 1],
+          indent:    outBuf[i * 3 + 2],
+        ));
+      }
+      return blocks;
+    } finally {
+      arena.releaseAll();
+    }
+  }
+
+  // ── extractBlocksFlat ───────────────────────────────────────────────────────
+  // Like extractBlocks but takes the full document text as a single string.
+  // One toNativeUtf8 call instead of N — dramatically faster for large files.
+  // Returns null if unavailable (caller falls back to extractBlocks or Dart).
+  static List<CodeBlock>? extractBlocksFlat(String text) {
+    final inst = _i;
+    if (!inst._available || inst._extractBlocksFlat == null) return null;
+    if (text.isEmpty) return const [];
+
+    final arena = Arena();
+    try {
+      final textN    = text.toNativeUtf8(allocator: arena);
+      const maxBlocks = 8192;
+      final outBuf   = arena<Int32>(maxBlocks * 3);
+
+      final count = inst._extractBlocksFlat!(
+          textN.cast<Uint8>(), text.length, outBuf, maxBlocks * 3);
 
       if (count < 0) return null;
 

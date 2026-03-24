@@ -48,6 +48,13 @@ import '../native/quill_native.dart';
 // Lines tokenised synchronously on init.
 const int _kVisible = 120;
 
+// Files larger than this skip the isolate entirely.
+// Sending List<String>.generate(180000, ...) to the isolate requires building
+// a 180k-element list on the main thread — at ~180k String refs that alone
+// freezes the UI for several hundred ms.  For large files the frame-budget
+// tokenizer (_onFrame) handles everything on the main thread in 6ms slices.
+const int _kMaxIsoLines = 30000;
+
 // ── Lightweight synchronous block extractor (UI thread) ───────────────────────
 //
 // Duplicates the logic from isolate_tokenizer.dart/_extractBlocks so it can
@@ -161,6 +168,27 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
   int  _jobNext        = 0;
   int  _jobStart       = 0;
   bool _frameScheduled = false;
+  // True when the current job is a full-file scan (init / _dispatchFull for
+  // large files).  Full scans MUST tokenize every line — the keystroke
+  // convergence check is disabled so an empty line at _jobStart can't cause
+  // premature termination.
+  bool _jobIsFull      = false;
+
+  // Current viewport range — used to prioritize visible lines first.
+  int _visibleFirst = 0;
+  int _visibleLast  = 0;
+
+  // ── Progressive block scan (large-file path only) ─────────────────────────
+  // Runs in lockstep with _onFrame's Phase 2 sequential scan.
+  // Maintains an incremental brace-matching state so fold arrows appear
+  // progressively without blocking the main thread.
+  int       _blkLine  = 0;   // next line to process in block scan
+  int       _blkTab   = 2;   // detected indent unit (spaces per level)
+  // Flat lists — avoids List<(int,int)> boxing overhead.
+  // _blkStack: [line0, char0, line1, char1, ...] — open brace positions
+  // _blkPairs: [start0, end0, start1, end1, ...] — matched brace pairs
+  final List<int> _blkStack = [];
+  final List<int> _blkPairs = [];
 
   IncrementalAnalyzeManager({required this.language});
 
@@ -273,6 +301,13 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
   /// on the UI thread so fold arrows appear/disappear in ≤ 16 ms.
   void _scheduleBlockRescan() {
     if (_blockRescanPending || _destroyed) return;
+    // Large files: skip the full rescan — just validate in the next frame.
+    // The progressive block scan in _onFrame handles extraction.
+    final content = _content;
+    if (content != null && content.lineCount > _kMaxIsoLines) {
+      _validateBlocks(content);
+      return;
+    }
     _blockRescanPending = true;
     SchedulerBinding.instance.scheduleFrameCallback(_onBlockRescanFrame,
         rescheduling: false);
@@ -285,9 +320,24 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
     final content = _content;
     if (content == null) return;
 
-    // Rust path: O(n) scan, zero heap alloc on hot path, ~0.3 ms for 20k lines.
-    // Falls back to Dart _extractCodeBlocksUI if native unavailable.
-    final blocks = QuillNative.extractBlocks(content) ?? _extractCodeBlocksUI(content);
+    // For large files, skip the full O(n) rescan — the progressive block scan
+    // (running in _onFrame) handles it. Just validate existing blocks so stale
+    // fold arrows from deleted braces disappear immediately.
+    if (content.lineCount > _kMaxIsoLines) {
+      _validateBlocks(content);
+      final cur = _partialSpans ?? styles.spans;
+      pushStyles(Styles(
+        spans:      List<List<CodeSpan>>.unmodifiable(cur),
+        codeBlocks: _currentBlocks,
+      ));
+      return;
+    }
+
+    // Small/medium file: full rescan via Rust flat-text path (one FFI call,
+    // ~0.5 ms for 30k lines) falling back to line-pointer or Dart.
+    final blocks = QuillNative.extractBlocksFlat(content.fullText)
+        ?? QuillNative.extractBlocks(content)
+        ?? _extractCodeBlocksUI(content);
     _currentBlocks = blocks;
     // Bug 1 fix: remove EOF-ghost blocks (unclosed { with no matching }).
     // _extractCodeBlocksUI keeps unmatched openers as blocks ending at EOF;
@@ -330,17 +380,153 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
       _partialSpans = buf;
     }
 
-    final lines = List<String>.generate(lineCount, content.getLineText);
-    _getOrCreateIso().tokenize(lines, version);
+    if (lineCount > _kMaxIsoLines) {
+      // Large file: skip isolate — use frame-budget. Also start progressive
+      // block scan so fold arrows appear without a full O(n) sync extraction.
+      _jobIsFull  = true;
+      _jobTotal   = lineCount;
+      _jobVersion = version;
+      _jobNext    = 0;
+      _jobStart   = 0;
+      _initBlkScan(content);
+      _scheduleFrame();
+    } else {
+      _jobIsFull  = false;
+      final lines = List<String>.generate(lineCount, content.getLineText);
+      _getOrCreateIso().tokenize(lines, version);
+    }
   }
 
   // ── Incremental frame-budget (keystroke convergence) ─────────────────────
+
+  // ── Block scan helpers (large-file progressive path) ─────────────────────
+
+  /// Resets block-scan state and detects the indent unit from the first
+  /// 200 lines.  Called when a large-file full scan begins.
+  void _initBlkScan(Content content) {
+    _blkLine = 0;
+    _blkTab  = 2;
+    _blkStack.clear();
+    _blkPairs.clear();
+    // Detect indent unit from a small sample.
+    final sample = content.lineCount.clamp(0, 200);
+    for (int i = 0; i < sample; i++) {
+      final txt = content.getLineText(i);
+      if (txt.isEmpty) continue;
+      int sp = 0;
+      for (int j = 0; j < txt.length; j++) {
+        final c = txt.codeUnitAt(j);
+        if (c == 32) sp++;
+        else if (c == 9) { sp += 2; break; }
+        else break;
+      }
+      if (sp > 0 && sp < _blkTab) _blkTab = sp;
+    }
+    if (_blkTab < 1 || _blkTab > 8) _blkTab = 2;
+  }
+
+  /// Processes one line of the block scan.  Updates `_blkStack` (open
+  /// braces) and `_blkPairs` (matched pairs) but does NOT increment `_blkLine`.
+  void _blkProcessLine(String txt, int lineNum) {
+    if (txt.isEmpty) return;
+    final n = txt.length;
+    bool s1 = false, s2 = false, tpl = false;
+    for (int j = 0; j < n; j++) {
+      final c = txt.codeUnitAt(j);
+      if (!s1 && !s2 && !tpl) {
+        if (c == 47 && j + 1 < n && txt.codeUnitAt(j + 1) == 47) break; // //
+        if (c == 39)  { s1  = true; continue; } // '
+        if (c == 34)  { s2  = true; continue; } // "
+        if (c == 96)  { tpl = true; continue; } // `
+        if (c == 123 || c == 40) {               // { (
+          if (_blkStack.length < 1024) { _blkStack.add(lineNum); _blkStack.add(c); }
+          continue;
+        }
+        if (c == 125 || c == 41) {               // } )
+          final want = c == 125 ? 123 : 40;
+          for (int k = _blkStack.length - 2; k >= 0; k -= 2) {
+            if (_blkStack[k + 1] == want) {
+              final sl = _blkStack[k];
+              if (lineNum > sl) { _blkPairs.add(sl); _blkPairs.add(lineNum); }
+              _blkStack.removeRange(k, _blkStack.length);
+              break;
+            }
+          }
+        }
+      } else {
+        final prev = j > 0 ? txt.codeUnitAt(j - 1) : 0;
+        if (s1  && c == 39 && prev != 92) { s1  = false; }
+        if (s2  && c == 34 && prev != 92) { s2  = false; }
+        if (tpl && c == 96)               { tpl = false; }
+      }
+    }
+  }
+
+  /// Called when `_blkLine >= _jobTotal`.  Handles unclosed openers, builds
+  /// the sorted CodeBlock list, validates, and pushes updated styles.
+  void _blkFinalize(Content content) {
+    final last = content.lineCount - 1;
+    // Unmatched openers end at last line (Python/Dart open blocks).
+    for (int k = 0; k < _blkStack.length; k += 2) {
+      final sl = _blkStack[k];
+      if (last > sl) { _blkPairs.add(sl); _blkPairs.add(last); }
+    }
+    _blkStack.clear();
+
+    if (_blkPairs.isEmpty) {
+      _currentBlocks = const [];
+    } else {
+      final raw = <CodeBlock>[];
+      for (int i = 0; i < _blkPairs.length; i += 2) {
+        final sl = _blkPairs[i];
+        final el = _blkPairs[i + 1];
+        // Compute indent level from the opener line.
+        final txt = content.getLineText(sl);
+        int spaces = 0;
+        for (int j = 0; j < txt.length; j++) {
+          final c = txt.codeUnitAt(j);
+          if (c == 32) spaces++;
+          else if (c == 9) spaces += _blkTab;
+          else break;
+        }
+        raw.add(CodeBlock(
+          startLine: sl,
+          endLine:   el,
+          indent:    spaces ~/ _blkTab,
+        ));
+      }
+      _blkPairs.clear();
+      raw.sort((a, b) {
+        final c = a.startLine.compareTo(b.startLine);
+        return c != 0 ? c : b.lineCount.compareTo(a.lineCount);
+      });
+      _currentBlocks = raw;
+    }
+
+    _validateBlocks(content);
+    final cur = _partialSpans ?? styles.spans;
+    pushStyles(Styles(
+      spans:      List<List<CodeSpan>>.unmodifiable(cur),
+      codeBlocks: _currentBlocks,
+    ));
+  }
 
   void _scheduleFrame() {
     if (_frameScheduled || _destroyed) return;
     _frameScheduled = true;
     SchedulerBinding.instance.scheduleFrameCallback(_onFrame, rescheduling: false);
     SchedulerBinding.instance.scheduleFrame();
+  }
+
+  @override
+  void notifyVisibleRange(int firstLine, int lastLine) {
+    _visibleFirst = firstLine;
+    _visibleLast  = lastLine;
+    // If a full-file job is running there may be untokenized visible lines —
+    // schedule a frame so they are tokenized at the next opportunity.
+    if (_jobIsFull && _jobTotal > 0 && _jobVersion == _currentVersion) {
+      _scheduleFrame();
+    }
   }
 
   void _onFrame(Duration _) {
@@ -353,35 +539,76 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
     if (buf == null || buf.length != _jobTotal) return;
 
     final sw = Stopwatch()..start();
-    int  i   = _jobNext;
-    bool done = false;
 
-    while (i < _jobTotal) {
-      final txt     = content.getLineText(i);
-      final oldLast = buf[i].isNotEmpty ? buf[i].last.type.index : -1;
-      // Use Rust tokenizer for single-line incremental updates (UI thread safe,
-      // ~0.05ms vs ~0.3ms Dart regex). Falls back to Dart if unavailable.
-      final spans = _tokenizeLineRust(txt) ?? language.tokenize([txt]).firstOrNull ?? const <CodeSpan>[];
-      buf[i] = spans;
-      final newLast = spans.isNotEmpty ? spans.last.type.index : -1;
-      if (i > _jobStart && newLast == oldLast) { done = true; i++; break; }
-      i++;
-      if (sw.elapsedMilliseconds >= 6) break;
-    }
-
-    _jobNext = i;
-    if (done || i >= _jobTotal) {
+    if (_jobIsFull) {
+      // ── Full-file scan (large file init / full reparse) ─────────────────
+      // Phase 1 (3 ms): visible range first — lines on-screen get colours
+      // immediately before the sequential scan has reached them.
+      final vF = _visibleFirst.clamp(0, _jobTotal - 1);
+      final vL = _visibleLast.clamp(0, _jobTotal - 1);
+      for (int vi = vF; vi <= vL && sw.elapsedMilliseconds < 3; vi++) {
+        if (buf[vi].isNotEmpty) continue;
+        final txt = content.getLineText(vi);
+        buf[vi] = _tokenizeLineRust(txt) ?? language.tokenize([txt]).firstOrNull ?? const <CodeSpan>[];
+      }
+      // Phase 2 (next 3 ms): sequential tokenization from _jobNext.
+      while (_jobNext < _jobTotal && sw.elapsedMilliseconds < 6) {
+        if (buf[_jobNext].isEmpty) {
+          final txt = content.getLineText(_jobNext);
+          buf[_jobNext] = _tokenizeLineRust(txt) ?? language.tokenize([txt]).firstOrNull ?? const <CodeSpan>[];
+        }
+        _jobNext++;
+      }
+      // Phase 3 (next 3 ms): progressive block scan — advances independently
+      // so fold arrows appear as matching braces are discovered.
+      while (_blkLine < _jobTotal && sw.elapsedMilliseconds < 9) {
+        _blkProcessLine(content.getLineText(_blkLine), _blkLine);
+        _blkLine++;
+      }
       pushStyles(Styles(
         spans:      List<List<CodeSpan>>.unmodifiable(buf),
-        codeBlocks: _currentBlocks,
+        codeBlocks: _currentBlocks, // updated by _blkFinalize when scan ends
       ));
-      onTokenizationComplete?.call();
+      final tokDone = _jobNext >= _jobTotal;
+      final blkDone = _blkLine >= _jobTotal;
+      if (tokDone && blkDone) {
+        _blkFinalize(content);   // pushes final styles with all blocks
+        onTokenizationComplete?.call();
+      } else {
+        _scheduleFrame();
+      }
     } else {
-      pushStyles(Styles(
-        spans:      List<List<CodeSpan>>.unmodifiable(buf),
-        codeBlocks: _currentBlocks,
-      ));
-      _scheduleFrame();
+      // ── Incremental scan (keystroke convergence) ─────────────────────────
+      int  i    = _jobNext;
+      bool done = false;
+
+      while (i < _jobTotal) {
+        final txt     = content.getLineText(i);
+        final oldLast = buf[i].isNotEmpty ? buf[i].last.type.index : -1;
+        // Use Rust tokenizer for single-line incremental updates (UI thread safe,
+        // ~0.05ms vs ~0.3ms Dart regex). Falls back to Dart if unavailable.
+        final spans = _tokenizeLineRust(txt) ?? language.tokenize([txt]).firstOrNull ?? const <CodeSpan>[];
+        buf[i] = spans;
+        final newLast = spans.isNotEmpty ? spans.last.type.index : -1;
+        if (i > _jobStart && newLast == oldLast) { done = true; i++; break; }
+        i++;
+        if (sw.elapsedMilliseconds >= 6) break;
+      }
+
+      _jobNext = i;
+      if (done || i >= _jobTotal) {
+        pushStyles(Styles(
+          spans:      List<List<CodeSpan>>.unmodifiable(buf),
+          codeBlocks: _currentBlocks,
+        ));
+        onTokenizationComplete?.call();
+      } else {
+        pushStyles(Styles(
+          spans:      List<List<CodeSpan>>.unmodifiable(buf),
+          codeBlocks: _currentBlocks,
+        ));
+        _scheduleFrame();
+      }
     }
   }
 
@@ -396,6 +623,7 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
     }
 
     final start  = lineCount > 0 ? editLine.clamp(0, lineCount - 1) : 0;
+    _jobIsFull   = false;
     _jobTotal    = lineCount;
     _jobVersion  = version;
     _jobNext     = start;
@@ -431,12 +659,26 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
       ));
     });
 
-    // Full tokenisation + block extraction via isolate.
+    // Full tokenisation via isolate (small files) or frame-budget (large files).
     // Call tokenize() directly (not _dispatchFull) so we don't double-increment
     // _currentVersion — the frame callback above uses `version`.
     if (lineCount > 0) {
-      final lines = List<String>.generate(lineCount, content.getLineText);
-      _getOrCreateIso().tokenize(lines, version);
+      if (lineCount > _kMaxIsoLines) {
+        // Large file: skip isolate — use frame-budget starting just after the
+        // already-tokenised visible block so we never freeze the main thread.
+        // Block scan always starts from line 0 to ensure correct brace matching.
+        _jobIsFull  = true;
+        _jobTotal   = lineCount;
+        _jobVersion = version;
+        _jobNext    = visN;
+        _jobStart   = visN;
+        _initBlkScan(content); // starts from line 0 regardless of visN
+        _scheduleFrame();
+      } else {
+        _jobIsFull  = false;
+        final lines = List<String>.generate(lineCount, content.getLineText);
+        _getOrCreateIso().tokenize(lines, version);
+      }
     }
   }
 
@@ -661,8 +903,11 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
     _iso?.destroy();
     _iso                = null;
     _jobTotal           = 0;
+    _jobIsFull          = false;
     _partialSpans       = null;
     _blockRescanPending = false;
+    _blkStack.clear();
+    _blkPairs.clear();
   }
 
   Duration _debounce(int n) {

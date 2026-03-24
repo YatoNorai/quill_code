@@ -535,6 +535,15 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     if (widget.controller.isCompletionVisible) {
       widget.controller.hideCompletion();
     }
+    // Inform the analyze manager which lines are now visible so it can
+    // prioritize tokenizing them first for progressive highlighting.
+    if (_vCtrl.hasClients && _lh > 0) {
+      final sY  = _vCtrl.offset;
+      final lc  = widget.controller.content.lineCount.clamp(1, 1 << 30);
+      final fl  = (sY / _lh).floor().clamp(0, lc - 1);
+      final ll  = ((sY + _vpSize.height) / _lh).ceil().clamp(0, lc - 1);
+      widget.controller.notifyVisibleRange(fl, ll);
+    }
   }
 
   void _onHScroll() {
@@ -1681,9 +1690,8 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
                   valueListenable: _cursorTick,
                   builder: (_, __, ___) {
                     final visible = !ctrl.props.readOnly &&
-                        (ctrl.isCompletionVisible ||
-                        (ctrl.isCompletionLoading && ctrl.completionItems.isEmpty))
-                        && !ctrl.ghostText.isVisible;
+                        ctrl.isCompletionVisible &&
+                        !ctrl.ghostText.isVisible;
                     if (!visible) return const SizedBox.shrink();
                     final pos     = _charToLocal(ctrl.cursor.position);
                     // Compact size for mobile screens; CompletionPopup is intrinsically sized
@@ -1701,16 +1709,17 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
                     final spaceBelow   = usableH - cursorBottom - pad;
                     final spaceAbove   = cursorTop - pad;
                     double top;
-                    if (spaceAbove >= popupH) {
-                      top = cursorTop - popupH - pad;      // fits above (preferred)
-                    } else if (spaceBelow >= popupH) {
-                      top = cursorBottom + pad;            // fits below (fallback)
-                    } else if (spaceAbove >= spaceBelow) {
-                      top = (cursorTop - popupH - pad).clamp(0.0, double.maxFinite);
-                    } else {
+                    // Prefer below (VSCode behaviour) — only go above when below has no room.
+                    if (spaceBelow >= popupH) {
+                      top = cursorBottom + pad;            // fits below (preferred)
+                    } else if (spaceAbove >= popupH) {
+                      top = cursorTop - popupH - pad;      // fits above (fallback)
+                    } else if (spaceBelow >= spaceAbove) {
                       top = cursorBottom + pad;            // more room below
+                    } else {
+                      top = (cursorTop - popupH - pad).clamp(0.0, double.maxFinite);
                     }
-                    // Horizontal: align to cursor, clamp so it never overflows right
+                    // Horizontal: start at cursor x; shift left if it would overflow right.
                     final left = pos.dx.clamp(pad, math.max(pad, availW - popupW)).toDouble();
                     return Positioned(
                       left: left, top: top,
@@ -1730,10 +1739,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
                     if (ctrl.props.readOnly) return const SizedBox.shrink();
                     if (ctrl.cursor.hasSelection) return const SizedBox.shrink();
                     // Never show diagnostic tooltip at the same time as completion popup
-                    if (ctrl.isCompletionVisible ||
-                        (ctrl.isCompletionLoading && ctrl.completionItems.isEmpty)) {
-                      return const SizedBox.shrink();
-                    }
+                    if (ctrl.isCompletionVisible) return const SizedBox.shrink();
                     final diag = ctrl.diagnostics.atPosition(ctrl.cursor.position);
                     if (diag == null) return const SizedBox.shrink();
                     return _diagTooltip(diag, ctrl.cursor.position, theme, cs);

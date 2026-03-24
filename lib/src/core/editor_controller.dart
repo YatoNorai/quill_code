@@ -200,6 +200,11 @@ class QuillCodeController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Called by the editor widget when the visible line range changes (scroll).
+  /// Forwards to the analyze manager so it can prioritize visible lines.
+  void notifyVisibleRange(int firstLine, int lastLine) =>
+      _analyzeManager.notifyVisibleRange(firstLine, lastLine);
+
   void insertText(String text) {
     if (_props.readOnly) return;
     // ── Bracket skip-over ────────────────────────────────────────────────────

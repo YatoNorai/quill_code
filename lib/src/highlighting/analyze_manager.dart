@@ -16,6 +16,10 @@ abstract class AnalyzeManager {
   void reanalyze(Content content);
   void destroy();
 
+  /// Called whenever the editor viewport scrolls to a new range of lines.
+  /// Implementations can use this to prioritize tokenizing visible lines first.
+  void notifyVisibleRange(int firstLine, int lastLine) {}
+
   void pushStyles(Styles styles) {
     _styles = styles;
     onStylesUpdated?.call(styles);

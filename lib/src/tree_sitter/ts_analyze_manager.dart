@@ -30,6 +30,10 @@ class TsAnalyzeManager extends AnalyzeManager {
   int _diagSeq = 0;
 
   static const _kDebounceMs = 80;
+  // Tree-sitter runs on the main thread.  At ~5 ms/1 k lines that is already
+  // 150 ms at 30 k lines (a visible stutter) and 2.5 s at 500 k lines (full
+  // freeze).  Fall back to the isolate-based regex tokeniser for large files.
+  static const _kMaxTsLines = 10000;
 
   // Tracks whether a next-frame reparse is already queued (structural edits).
   bool _immediateReparsePending = false;
@@ -55,6 +59,13 @@ class TsAnalyzeManager extends AnalyzeManager {
         ? (_language as TsLanguageMixin).tsName
         : _language.name.toLowerCase();
 
+    if (content.lineCount > _kMaxTsLines) {
+      debugPrint('[TS] FALLBACK: file too large (${content.lineCount} lines > $_kMaxTsLines)');
+      _useFallback = true;
+      _fallback.init(content);
+      return;
+    }
+
     debugPrint('[TS] creating parser for langName="$langName"');
     _tsParser = TsParser.create(langName);
     if (_tsParser == null) {
@@ -73,6 +84,14 @@ class TsAnalyzeManager extends AnalyzeManager {
   @override
   void onContentChanged(ContentChangeEvent event, Content content) {
     if (_useFallback) { _fallback.onContentChanged(event, content); return; }
+    // If the document grew beyond the threshold mid-session, switch to fallback.
+    if (content.lineCount > _kMaxTsLines) {
+      debugPrint('[TS] FALLBACK: file grew too large (${content.lineCount} lines)');
+      _useFallback = true;
+      _debounce?.cancel();
+      _fallback.init(content);
+      return;
+    }
     _lastEvent = event;
     _debounce?.cancel();
 
@@ -148,7 +167,9 @@ class TsAnalyzeManager extends AnalyzeManager {
     final blocks = parser.extractBlocks();
     debugPrint('[TS] highlight: ${spans.length} spans, ${blocks.length} blocks');
     final lineStarts  = _buildLineStarts(source);
-    final lineCount   = source.split('\n').length;
+    // Use Content.lineCount directly — avoids allocating a 500k-element list
+    // just to count newlines (source.split('\n').length was O(n) allocation).
+    final lineCount   = content.lineCount;
     final spansByLine = <int, List<CodeSpan>>{};
 
     for (final sp in spans) {

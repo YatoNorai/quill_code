@@ -104,12 +104,23 @@ class DiagnosticsContainer {
   /// has moved past the error token, so we return null.
   DiagnosticRegion? atPosition(CharPosition pos) {
     for (final r in _regions) {
-      if (r.range.start.line == pos.line) {
-        // cursor must be >= start AND strictly < end (not at or past the end)
+      final sl = r.range.start.line;
+      final el = r.range.end.line;
+      if (pos.line < sl || pos.line > el) continue;
+
+      if (sl == el) {
+        // Single-line diagnostic: cursor must be >= start col AND strictly
+        // < end col (cursor AT end means no characters of the token remain
+        // after it → tooltip must NOT appear).
         if (pos.column >= r.range.start.column &&
-            pos.column < r.range.end.column) {
+            pos.column <  r.range.end.column) {
           return r;
         }
+      } else {
+        // Multi-line diagnostic.
+        if (pos.line == sl && pos.column < r.range.start.column) continue;
+        if (pos.line == el && pos.column >= r.range.end.column)  continue;
+        return r;
       }
     }
     return null;
