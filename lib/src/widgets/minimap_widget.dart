@@ -1,3 +1,4 @@
+
 // lib/src/widgets/minimap_widget.dart
 //
 // Minimap VSCode-style
@@ -49,10 +50,15 @@ class _MinimapState extends State<MinimapWidget>
 
   // ── Picture cache ─────────────────────────────────────────────────────────
   ui.Picture? _picture;
-  double _pictureWidth  = 0;
-  double _pictureHeight = 0;
-  int    _cacheVersion  = -1;
-  double _cacheScroll   = -1;
+  double _pictureWidth   = 0;
+  double _pictureHeight  = 0;
+  int    _cacheVersion   = -1;
+  // Line range covered by the current picture.  The picture only needs
+  // rebuilding when the visible range leaves this window — NOT on every
+  // scroll tick.  Storing both endpoints lets us skip the rebuild on fast
+  // flinging when the buffered over-scan still covers the viewport.
+  int    _cacheFirstLine = -1;
+  int    _cacheLastLine  = -1;
 
   // ── Token color cache (rebuilt only when theme changes) ──────────────────
   EditorColorScheme? _cachedCs;
@@ -97,21 +103,21 @@ class _MinimapState extends State<MinimapWidget>
     super.initState();
     _hlAnim = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 400));
-    widget.controller.addListener(_onChanged);
-    widget.vCtrl.addListener(_onChanged);
+    widget.controller.addListener(_onContentChanged);
+    widget.vCtrl.addListener(_onScrollChanged);
   }
 
   @override
   void didUpdateWidget(MinimapWidget old) {
     super.didUpdateWidget(old);
     if (old.controller != widget.controller) {
-      old.controller.removeListener(_onChanged);
-      widget.controller.addListener(_onChanged);
+      old.controller.removeListener(_onContentChanged);
+      widget.controller.addListener(_onContentChanged);
       _invalidate();
     }
     if (old.vCtrl != widget.vCtrl) {
-      old.vCtrl.removeListener(_onChanged);
-      widget.vCtrl.addListener(_onChanged);
+      old.vCtrl.removeListener(_onScrollChanged);
+      widget.vCtrl.addListener(_onScrollChanged);
       _invalidate();
     }
     if (old.theme != widget.theme) _invalidate();
@@ -119,24 +125,33 @@ class _MinimapState extends State<MinimapWidget>
 
   @override
   void dispose() {
-    widget.controller.removeListener(_onChanged);
-    widget.vCtrl.removeListener(_onChanged);
+    widget.controller.removeListener(_onContentChanged);
+    widget.vCtrl.removeListener(_onScrollChanged);
     _hlAnim.dispose();
     _picture?.dispose();
     _repaintN.dispose();
     super.dispose();
   }
 
-  // Invalida a picture e pede rebuild ao AnimatedBuilder.
-  // Não usa setState — LayoutBuilder não precisa re-executar.
-  void _onChanged() {
+  /// Content changed → always rebuild the picture (new tokens / new lines).
+  void _onContentChanged() {
     if (!mounted) return;
     _picture?.dispose();
-    _picture = null;
+    _picture        = null;
+    _cacheFirstLine = -1;
+    _cacheLastLine  = -1;
     _repaintN.value++;
   }
 
-  void _invalidate() => _onChanged();
+  /// Scroll changed → only request a repaint; the picture is reused as long as
+  /// the visible line range stays inside the already-buffered region.
+  /// _ensurePicture will decide whether a rebuild is necessary.
+  void _onScrollChanged() {
+    if (!mounted) return;
+    _repaintN.value++;
+  }
+
+  void _invalidate() => _onContentChanged();
 
   // ── Token color helpers ───────────────────────────────────────────────────
   void _rebuildTokenColors(EditorColorScheme cs) {
@@ -159,39 +174,48 @@ class _MinimapState extends State<MinimapWidget>
   // Chamado DENTRO do AnimatedBuilder com dados sempre frescos.
   // Retorna a picture existente se o cache ainda é válido.
   ui.Picture _ensurePicture(Size size, double scrollRatio) {
-    final ver = widget.controller.content.documentVersion;
+    final ver       = widget.controller.content.documentVersion;
+    final lineCount = widget.controller.content.lineCount;
+
+    // Compute which lines are currently visible (+ 1-line tolerance).
+    final totalMiniH = lineCount * _kLineH;
+    final miniOff    = totalMiniH > size.height
+        ? scrollRatio * (totalMiniH - size.height) : 0.0;
+    final visFirst = math.max(0, (miniOff / _kLineH).floor() - 1);
+    final visLast  = math.min(lineCount - 1,
+        ((miniOff + size.height) / _kLineH).ceil() + 1);
+
+    // Reuse the cached picture if it still covers the visible range.
     if (_picture != null
-        && _cacheVersion == ver
-        && (_cacheScroll  - scrollRatio).abs() <= 0.001
+        && _cacheVersion   == ver
+        && _cacheFirstLine <= visFirst
+        && _cacheLastLine  >= visLast
         && (_pictureWidth  - size.width ).abs() <= 0.5
         && (_pictureHeight - size.height).abs() <= 0.5) {
       return _picture!;
     }
+
+    // Build with 2× over-scan so the picture lasts longer before needing
+    // a rebuild (important for large files where each build touches the rope).
+    final buildFirst = math.max(0,            visFirst - _kBuffer * 2);
+    final buildLast  = math.min(lineCount - 1, visLast + _kBuffer * 2);
+
     _picture?.dispose();
-    _picture       = _buildPicture(size, scrollRatio);
-    _cacheVersion  = ver;
-    _cacheScroll   = scrollRatio;
-    _pictureWidth  = size.width;
-    _pictureHeight = size.height;
+    _picture        = _buildPicture(size, buildFirst, buildLast);
+    _cacheVersion   = ver;
+    _cacheFirstLine = buildFirst;
+    _cacheLastLine  = buildLast;
+    _pictureWidth   = size.width;
+    _pictureHeight  = size.height;
     return _picture!;
   }
 
-  ui.Picture _buildPicture(Size size, double scrollRatio) {
-    final ctrl      = widget.controller;
-    final cs        = widget.theme.colorScheme;
+  ui.Picture _buildPicture(Size size, int firstLine, int lastLine) {
+    final ctrl = widget.controller;
+    final cs   = widget.theme.colorScheme;
     _rebuildTokenColors(cs);
 
-    final lineCount  = ctrl.content.lineCount;
-    final w          = size.width;
-    final totalMiniH = lineCount * _kLineH;
-    final miniOff    = totalMiniH > size.height
-        ? scrollRatio * (totalMiniH - size.height) : 0.0;
-
-    final firstLine = math.max(0,
-        ((miniOff / _kLineH) - _kBuffer).floor());
-    final lastLine  = math.min(lineCount - 1,
-        ((miniOff + size.height) / _kLineH + _kBuffer).ceil());
-
+    final w   = size.width;
     final rec = ui.PictureRecorder();
     final c   = Canvas(rec);
 

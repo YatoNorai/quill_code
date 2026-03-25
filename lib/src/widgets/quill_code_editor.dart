@@ -21,6 +21,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:math' as math;
+import 'dart:ui' show ClipOp;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -47,6 +48,8 @@ import 'actions_menu_widget.dart';
 import '../actions/code_action_provider.dart';
 import '../actions/lightbulb_widget.dart';
 import '../text/bracket_matcher.dart';
+import '../color/color_detector.dart';
+import 'color_picker_overlay.dart';
 import '../actions/symbol_analyzer.dart';
 import '../actions/symbol_info_panel.dart';
 import '../lsp/lsp_bridge.dart';
@@ -208,6 +211,22 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   bool    _handlesHiddenByScroll = false;
   bool    _toolbarHiddenByScroll = false;
 
+  // ── Scrollbar fade animation + drag ──────────────────────────────────
+  late AnimationController _scrollbarFade;
+  Timer?  _scrollbarHideTimer;
+  // Track initial pixels when a scrollbar drag starts
+  double _sbVDragStartPx    = 0;
+  double _sbVDragStartLocal = 0;
+  double _sbHDragStartPx    = 0;
+  double _sbHDragStartLocal = 0;
+
+  // ── Color decorator picker state ─────────────────────────────────────
+  Offset?     _colorPickerAnchor;
+  ColorMatch? _colorPickerMatch;
+  int         _colorPickerLine = -1;
+  final Map<int, List<ColorMatch>> _colorCache = {};
+  int _colorCacheVersion = -1;
+
   // ── Magnifier (shown above finger during cursor-handle drag) ──────────
   Offset? _magnifierPos; // local position of magnified point; null = hidden
 
@@ -322,6 +341,11 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
         if (s == AnimationStatus.completed) _blink.reverse();
         if (s == AnimationStatus.dismissed) _blink.forward();
       });
+    _scrollbarFade = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 200),
+      value: 0.0,
+    );
     _focus.addListener(_onFocusChange);
     widget.controller.addListener(_onCtrl);
     widget.controller.scrollResetVersion.addListener(_onScrollReset);
@@ -337,7 +361,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     _handleListenable     = Listenable.merge([_cursorTick, _handleTick, _zoomN]);
     _toolbarListenable    = Listenable.merge([_toolbarVisible, _zoomN]);
     _magnifierListenable  = Listenable.merge([_handleTick, _cursorTick]);
-    _scrollListenable     = Listenable.merge([widget.controller, _blink]);
+    _scrollListenable     = Listenable.merge([widget.controller, _blink, _handleTick]);
     if (widget.autofocus) WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) _showKbd(); });
     // Attach LSP if provided
     if (widget.lspClient != null || widget.lspConfig != null) {
@@ -437,6 +461,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     _cursorHandleTimer?.cancel();
     _edgeTimer?.cancel();
     _scrollEndTimer?.cancel();
+    _scrollbarHideTimer?.cancel();
     _inputConn?.close();
     _inputConn = null;
 
@@ -445,6 +470,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     _blink.clearListeners();
     _blink.clearStatusListeners();
     _blink.dispose();
+    _scrollbarFade.dispose();
     _cursorTick.dispose();
     _gutterScrollY.dispose();
     _foldN.dispose();
@@ -500,6 +526,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   void _onScrollReset() {
     if (!mounted) return;
     _cachedVis = null; // fold cache is stale for the new content
+    _activeBracketPair = null; // stale pair highlight must be cleared for the new file
 
     // Attempt immediate scroll reset — works if the scroll controller is
     // already attached. This covers the common case where we are NOT in the
@@ -572,6 +599,21 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     // Reset the idle timer on every scroll event
     _scrollEndTimer?.cancel();
     _scrollEndTimer = Timer(const Duration(milliseconds: 400), _onScrollEnded);
+    // Show scrollbars and reset the auto-hide timer
+    _onScrollbarActivity();
+  }
+
+  void _onScrollbarActivity() {
+    if (!widget.controller.props.showScrollbars) return;
+    final secs = _effectiveTheme.scrollbar.autoHideSeconds;
+    _scrollbarFade.forward();
+    _scrollbarHideTimer?.cancel();
+    if (secs > 0) {
+      _scrollbarHideTimer = Timer(
+        Duration(milliseconds: (secs * 1000).round()),
+        () { if (mounted) _scrollbarFade.reverse(); },
+      );
+    }
   }
 
   /// Called 400 ms after the last scroll event. Restores handles + toolbar.
@@ -1021,6 +1063,25 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
       widget.controller.ghostText.dismiss();
     }
 
+    // Color swatch tap: toggle inline color picker
+    {
+      final cm = _colorSwatchAt(loc);
+      if (cm != null) {
+        final sY = _vCtrl.hasClients ? _vCtrl.offset : 0.0;
+        final vis = _visibleLines();
+        final vi  = ((loc.dy + sY) / _lh).floor().clamp(0, math.max(0, vis.length - 1)).toInt();
+        final docLine = vi < vis.length ? vis[vi] : _colorPickerLine;
+        setState(() {
+          if (_colorPickerLine == docLine && _colorPickerMatch?.start == cm.start) {
+            _colorPickerAnchor = null; _colorPickerMatch = null; _colorPickerLine = -1;
+          } else {
+            _colorPickerAnchor = loc; _colorPickerMatch = cm; _colorPickerLine = docLine;
+          }
+        });
+        return;
+      }
+    }
+
     // Gutter: fold arrow zone (right 22px) or breakpoint area
     if (loc.dx < _gw) {
       if (loc.dx > _gw - 22) _tryFold(loc);
@@ -1413,6 +1474,31 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   }
 
   void _bump() => _cursorTick.value++;
+
+  // ── Color decorator helpers ────────────────────────────────────────────
+  List<ColorMatch> _colorsForLine(int line) {
+    final ver = widget.controller.content.documentVersion;
+    if (ver != _colorCacheVersion) { _colorCache.clear(); _colorCacheVersion = ver; }
+    return _colorCache.putIfAbsent(line,
+        () => ColorDetector.detect(widget.controller.content.getLineText(line)));
+  }
+
+  /// If [local] is over a color swatch, return the match; else null.
+  ColorMatch? _colorSwatchAt(Offset local) {
+    if (!widget.controller.props.showColorDecorators) return null;
+    final sY  = _vCtrl.hasClients ? _vCtrl.offset : 0.0;
+    final sX  = _hCtrl.hasClients ? _hCtrl.offset : 0.0;
+    final vis = _visibleLines();
+    if (vis.isEmpty) return null;
+    final vi = ((local.dy + sY) / _lh).floor().clamp(0, vis.length - 1).toInt();
+    if (vi >= vis.length) return null;
+    for (final m in _colorsForLine(vis[vi])) {
+      final textX = _gw + _codePad + m.start * _cw - sX;
+      final sx    = textX - _EBox._swatchSize - _EBox._swatchRightGap - _EBox._swatchLeftGap;
+      if (local.dx >= sx - 2 && local.dx <= sx + _EBox._swatchSize + 2) return m;
+    }
+    return null;
+  }
 
   void _unindentLine() {
     final ctrl = widget.controller; final line = ctrl.cursor.line;
@@ -1854,6 +1940,13 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
                     },
                   ),
 
+                // ── Layer 13: Scrollbars ──────────────────────────────
+                if (ctrl.props.showScrollbars) _buildScrollbars(cs),
+
+                // ── Layer 14: Color picker ────────────────────────────
+                if (_colorPickerAnchor != null && _colorPickerMatch != null)
+                  _buildColorPickerLayer(),
+
               ])         // Stack children
             ),           // ClipRect
           );             // GestureDetector (return)
@@ -1865,6 +1958,156 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
           theme: widget.theme ?? QuillThemeDark.build(),
         ),
       ]),
+    );
+  }
+
+  // ── Scrollbars ─────────────────────────────────────────────────────────
+  Widget _buildScrollbars(EditorColorScheme cs) {
+    final sb     = _effectiveTheme.scrollbar;
+    final thick  = sb.thickness;
+    final thumbC = sb.thumbColor ?? cs.scrollBarThumb;
+    final trackC = sb.trackColor ?? cs.scrollBarTrack;
+    // Horizontal bar left offset: if gutter is fixed it starts after the gutter.
+    final ctrl   = widget.controller;
+    final gutterLeft = (ctrl.props.fixedLineNumbers && _gw > 0)
+        ? (_gwN.value > 1.0 ? _gwN.value : _gw)
+        : 0.0;
+
+    return AnimatedBuilder(
+      animation: _scrollbarFade,
+      builder: (_, __) {
+        final opacity = _scrollbarFade.value;
+        if (opacity == 0) return const SizedBox.shrink();
+        return ListenableBuilder(
+          listenable: Listenable.merge([_vCtrl, _hCtrl]),
+          builder: (_, __) {
+            final vPos   = _vCtrl.positions.firstOrNull;
+            final hPos   = _hCtrl.positions.firstOrNull;
+            final vReady = vPos != null && vPos.hasContentDimensions && vPos.hasPixels;
+            final hReady = hPos != null && hPos.hasContentDimensions && hPos.hasPixels;
+            final showV  = vReady && vPos!.maxScrollExtent > 0;
+            final showH  = hReady && hPos!.maxScrollExtent > 0;
+            if (!showV && !showH) return const SizedBox.shrink();
+            return Opacity(
+              opacity: opacity,
+              child: Stack(children: [
+                // ── Vertical bar ─────────────────────────────────────────
+                if (showV) Positioned(
+                  right: 0, top: 0, bottom: showH ? thick : 0, width: thick,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onVerticalDragStart: (d) {
+                      _sbVDragStartLocal = d.localPosition.dy;
+                      _sbVDragStartPx    = vPos!.pixels;
+                      _onScrollbarActivity();
+                    },
+                    onVerticalDragUpdate: (d) {
+                      final pos        = vPos!;
+                      final trackLen   = math.max(1.0, pos.viewportDimension - (showH ? thick : 0));
+                      final total      = pos.viewportDimension + pos.maxScrollExtent;
+                      final minLen     = math.min(sb.minThumbLength, trackLen);
+                      final thumbLen   = (pos.viewportDimension / total * trackLen)
+                          .clamp(minLen, trackLen);
+                      final avail      = trackLen - thumbLen;
+                      if (avail <= 0) return;
+                      final ratio      = pos.maxScrollExtent / avail;
+                      final delta      = d.localPosition.dy - _sbVDragStartLocal;
+                      final newPx      = (_sbVDragStartPx + delta * ratio)
+                          .clamp(0.0, pos.maxScrollExtent);
+                      _vCtrl.jumpTo(newPx);
+                      _onScrollbarActivity();
+                    },
+                    onVerticalDragEnd: (_) => _onScrollbarActivity(),
+                    child: CustomPaint(painter: _ScrollbarThumbPainter(
+                      position: vPos!.pixels, maxExtent: vPos.maxScrollExtent,
+                      viewportExtent: vPos.viewportDimension,
+                      thumbColor: thumbC, trackColor: trackC,
+                      borderColor: sb.borderColor, borderWidth: sb.borderWidth,
+                      radius: sb.radius, showTrack: sb.showTrack,
+                      minThumbLength: sb.minThumbLength, vertical: true)),
+                  ),
+                ),
+                // ── Horizontal bar ───────────────────────────────────────
+                if (showH) Positioned(
+                  left: gutterLeft, bottom: 0,
+                  right: showV ? thick : 0, height: thick,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onHorizontalDragStart: (d) {
+                      _sbHDragStartLocal = d.localPosition.dx;
+                      _sbHDragStartPx    = hPos!.pixels;
+                      _onScrollbarActivity();
+                    },
+                    onHorizontalDragUpdate: (d) {
+                      final pos        = hPos!;
+                      final trackLen   = math.max(1.0, pos.viewportDimension - (showV ? thick : 0));
+                      final total      = pos.viewportDimension + pos.maxScrollExtent;
+                      final minLen     = math.min(sb.minThumbLength, trackLen);
+                      final thumbLen   = (pos.viewportDimension / total * trackLen)
+                          .clamp(minLen, trackLen);
+                      final avail      = trackLen - thumbLen;
+                      if (avail <= 0) return;
+                      final ratio      = pos.maxScrollExtent / avail;
+                      final delta      = d.localPosition.dx - _sbHDragStartLocal;
+                      final newPx      = (_sbHDragStartPx + delta * ratio)
+                          .clamp(0.0, pos.maxScrollExtent);
+                      _hCtrl.jumpTo(newPx);
+                      _onScrollbarActivity();
+                    },
+                    onHorizontalDragEnd: (_) => _onScrollbarActivity(),
+                    child: CustomPaint(painter: _ScrollbarThumbPainter(
+                      position: hPos!.pixels, maxExtent: hPos.maxScrollExtent,
+                      viewportExtent: hPos.viewportDimension,
+                      thumbColor: thumbC, trackColor: trackC,
+                      borderColor: sb.borderColor, borderWidth: sb.borderWidth,
+                      radius: sb.radius, showTrack: sb.showTrack,
+                      minThumbLength: sb.minThumbLength, vertical: false)),
+                  ),
+                ),
+              ]),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // ── Color picker overlay ────────────────────────────────────────────────
+  Widget _buildColorPickerLayer() {
+    final anchor = _colorPickerAnchor!;
+    final match  = _colorPickerMatch!;
+    final line   = _colorPickerLine;
+    const pickerW = 238.0;
+    const pickerH = 256.0;
+    const pad = 4.0;
+    double left = (anchor.dx - 10).clamp(pad, math.max(pad, _vpSize.width - pickerW - pad));
+    double top  = anchor.dy + _lh + 2;
+    if (top + pickerH > _vpSize.height - pad) top = (anchor.dy - pickerH - 2).clamp(pad, double.infinity);
+    return Positioned(
+      left: left, top: top,
+      child: ColorPickerOverlay(
+        initialColor: match.color,
+        initialText:  () {
+          final t = widget.controller.content.getLineText(line);
+          if (match.end > t.length) return t; // stale match — just show whole text
+          return t.substring(match.start, match.end);
+        }(),
+        onCommit: (_, newText) {
+          final ctrl = widget.controller;
+          final old  = ctrl.content.getLineText(line);
+          final neo  = old.substring(0, match.start) + newText + old.substring(match.end);
+          final len  = ctrl.content.getLineLength(line);
+          ctrl.content.delete(EditorRange(CharPosition(line, 0), CharPosition(line, len)));
+          ctrl.content.insert(CharPosition(line, 0), neo);
+          _colorCache.remove(line);
+          _bump();
+        },
+        onDismiss: () => setState(() {
+          _colorPickerAnchor = null;
+          _colorPickerMatch  = null;
+          _colorPickerLine   = -1;
+        }),
+      ),
     );
   }
 
@@ -2396,7 +2639,10 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
             gw:               _gw,
             vOff:             vOff,
             hOff:             hOff,
-            cursorAlpha:      _focus.hasFocus ? _blink.value : 1.0,
+            // Don't blink while the cursor handle is visible or being dragged —
+            // a pulsing cursor behind a handle is visually confusing.
+            cursorAlpha:      (_focus.hasFocus && !_cursorHandleVisible && _drag != 'cursor')
+                                  ? _blink.value : 1.0,
             showCursor:       !ctrl.props.readOnly && !ctrl.cursor.hasSelection,
             vpSize:           _vpSize,
             vis:              _visibleLines(),
@@ -2477,6 +2723,59 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Data classes
+// ═══════════════════════════════════════════════════════════════════════════
+// Scrollbar thumb painter
+// ═══════════════════════════════════════════════════════════════════════════
+class _ScrollbarThumbPainter extends CustomPainter {
+  final double  position;
+  final double  maxExtent;
+  final double  viewportExtent;
+  final Color   thumbColor;
+  final Color   trackColor;
+  final Color?  borderColor;
+  final double  borderWidth;
+  final double  radius;
+  final bool    showTrack;
+  final double  minThumbLength;
+  final bool    vertical;
+  const _ScrollbarThumbPainter({
+    required this.position, required this.maxExtent,
+    required this.viewportExtent,
+    required this.thumbColor, required this.trackColor,
+    required this.vertical,
+    this.borderColor, this.borderWidth = 0.0,
+    this.radius = 3.0, this.showTrack = true, this.minThumbLength = 20.0,
+  });
+  @override
+  void paint(Canvas c, Size sz) {
+    final trackLen = math.max(1.0, vertical ? sz.height : sz.width);
+    final total    = viewportExtent + maxExtent;
+    final minLen   = math.min(minThumbLength, trackLen);
+    final thumbLen = (viewportExtent / total * trackLen).clamp(minLen, trackLen);
+    final avail    = math.max(0.0, trackLen - thumbLen);
+    final pct      = maxExtent > 0 ? position / maxExtent : 0.0;
+    final start    = (pct * avail).clamp(0.0, avail);
+    if (showTrack) c.drawRect(Offset.zero & sz, Paint()..color = trackColor);
+    final r = vertical
+        ? Rect.fromLTWH(1, start, sz.width - 2, thumbLen)
+        : Rect.fromLTWH(start, 1, thumbLen, sz.height - 2);
+    final rr = RRect.fromRectAndRadius(r, Radius.circular(radius));
+    c.drawRRect(rr, Paint()..color = thumbColor);
+    if (borderColor != null && borderWidth > 0) {
+      c.drawRRect(rr, Paint()
+        ..color = borderColor!
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = borderWidth);
+    }
+  }
+  @override
+  bool shouldRepaint(_ScrollbarThumbPainter o) =>
+      o.position != position || o.maxExtent != maxExtent ||
+      o.viewportExtent != viewportExtent || o.thumbColor != thumbColor ||
+      o.borderColor != borderColor || o.borderWidth != borderWidth ||
+      o.radius != radius || o.showTrack != showTrack;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 class _ToolItem { final String label; final IconData icon; final VoidCallback action; const _ToolItem(this.label, this.icon, this.action); }
 
@@ -2582,6 +2881,16 @@ class _EditorViewport extends LeafRenderObjectWidget {
   // on hit we remove-then-reinsert to promote to MRU (true LRU in O(1)).
   final LinkedHashMap<_LCK, TextPainter> _lc = LinkedHashMap();
   static const int _lcMax = 1024;
+
+  // ── _paintBlocks depth + active-block cache ────────────────────────────
+  // Depths are O(N log N) to compute; cache by blocks-list identity so we
+  // only recompute when styles are pushed (not every paint frame).
+  List<CodeBlock>? _depthCacheBlocks;
+  List<int>        _depthCache = const [];
+  // Active block depends on cursor line; recompute only when either changes.
+  List<CodeBlock>? _activeCacheBlocks;
+  int              _activeCacheCursor = -1;
+  CodeBlock?       _activeCacheResult;
 
   // ── Cached Paint objects — reused every frame, never re-allocated ────────
   final Paint _pBg       = Paint();
@@ -2959,7 +3268,10 @@ class _EditorViewport extends LeafRenderObjectWidget {
   // lh and cw now derived purely from fontSize — no zoom multiplier
   double get lh => _theme.lineHeightPx;
   double get cw => _theme.fontSize * 0.601;
-  static const double _codePad = 6.0;
+  static const double _codePad      = 6.0;
+  static const double _swatchSize   = 9.0;
+  static const double _swatchRightGap = 5.0;
+  static const double _swatchLeftGap  = 5.0;
 
   // ── Pointer / gesture handling ──────────────────────────────────────────
 
@@ -3183,7 +3495,32 @@ class _EditorViewport extends LeafRenderObjectWidget {
     if (_bracketPair != null)     _paintBracketPair(c, off, cs, sY, sX, fl, ll);
     if (_ctrl.props.showBlockLines) _paintBlocks(c, off, cs, sY, sX, fl, ll);
     _paintIndentDots(c, off, sY, sX, fl, ll);
-    for (int vi = fl; vi <= ll; vi++) { if (vi >= vc) break; _paintLine(c, off, cs, vi, sY, sX); }
+    for (int vi = fl; vi <= ll; vi++) {
+      if (vi >= vc) break;
+      if (_ctrl.props.showColorDecorators) {
+        final matches = _colorMatchesForVi(vi);
+        if (matches.isNotEmpty) {
+          // Clip-exclude the swatch + gap zones so text is never drawn there.
+          // This creates genuine blank space without erasing any background.
+          c.save();
+          for (final m in matches) {
+            final textX  = off.dx + _gw + _codePad + m.start * cw - sX;
+            // Exclude: from leftGap before swatch to color-text start.
+            final zoneL  = math.max(textX - _swatchSize - _swatchRightGap - _swatchLeftGap,
+                                    off.dx + _gw);
+            final zoneR  = textX;
+            if (zoneR > zoneL) {
+              c.clipRect(Rect.fromLTRB(zoneL, off.dy, zoneR, off.dy + size.height),
+                         clipOp: ClipOp.difference);
+            }
+          }
+          _paintLine(c, off, cs, vi, sY, sX);
+          c.restore();
+          continue;
+        }
+      }
+      _paintLine(c, off, cs, vi, sY, sX);
+    }
     if (_ctrl.props.showDiagnosticIndicators) _paintDiag(c, off, cs, sY, sX, fl, ll);
     _paintGhostText(c, off, cs, sY, sX, fl, ll);
     if (_showCursor) {
@@ -3191,6 +3528,7 @@ class _EditorViewport extends LeafRenderObjectWidget {
       if (ci >= fl && ci <= ll) _paintCursor(c, off, cs, sY, sX, ci);
     }
     if (!_ctrl.props.fixedLineNumbers && _gw > 0) _paintGutter(c, off, cs, sY, sX, fl, ll);
+    _paintColorDecorators(c, off, sY, sX, fl, ll);
     c.restore();
   }
 
@@ -3481,6 +3819,37 @@ class _EditorViewport extends LeafRenderObjectWidget {
     final llExtra    = math.min(_vis.length - 1, ll + 10);
     final llDocLine  = _vis.isEmpty ? 0 : _vis[llExtra.clamp(0, _vis.length - 1)];
 
+    // ── Pre-compute active block (O(N) once, not O(N) × visible_blocks) ────
+    if (!identical(blocks, _activeCacheBlocks) || _activeCacheCursor != cursorLine) {
+      _activeCacheBlocks = blocks;
+      _activeCacheCursor = cursorLine;
+      _activeCacheResult = _activeBlockForLine(blocks, cursorLine);
+    }
+    final activeBlock = _activeCacheResult;
+
+    // ── Pre-compute depths (O(N log N) once when blocks change) ────────────
+    // Avoids the O(total²) nested loop that was running every paint frame.
+    if (!identical(blocks, _depthCacheBlocks)) {
+      _depthCacheBlocks = blocks;
+      final n = blocks.length;
+      final d = List<int>.filled(n, 0);
+      // Sort indices by (startLine ASC, endLine DESC) — outer blocks first.
+      final idxs = List<int>.generate(n, (i) => i)
+        ..sort((ia, ib) {
+          final c = blocks[ia].startLine.compareTo(blocks[ib].startLine);
+          return c != 0 ? c : blocks[ib].endLine.compareTo(blocks[ia].endLine);
+        });
+      // One-pass stack sweep: stack holds endLines of active containers.
+      final endStack = <int>[];
+      for (final idx in idxs) {
+        final bl = blocks[idx];
+        while (endStack.isNotEmpty && endStack.last < bl.startLine) endStack.removeLast();
+        d[idx] = endStack.length;
+        endStack.add(bl.endLine);
+      }
+      _depthCache = d;
+    }
+
     for (int bi = 0; bi < blocks.length; bi++) {
       final b = blocks[bi];
       // Don't break early — blocks might not be strictly sorted and
@@ -3519,18 +3888,15 @@ class _EditorViewport extends LeafRenderObjectWidget {
       final y2 = off.dy + _rowY(endViActual) - sY;
       if (y2 <= y1) continue;
 
-      // ── Active block detection (pre-computed above) ─────────────────
-      final isActive = identical(b, _activeBlockForLine(blocks, cursorLine));
-
-      // ── Color ────────────────────────────────────────────────────────
-      int depth = 0;
-      for (final ob in blocks) {
-        if (ob != b && ob.startLine <= b.startLine && ob.endLine >= b.endLine) depth++;
-      }
+      // ── Active block and depth (pre-computed before loop) ───────────
+      final isActive = identical(b, activeBlock);
+      final depth    = bi < _depthCache.length ? _depthCache[bi] : 0;
 
       Color lineColor;
       if (isActive) {
-        lineColor = blt.activeColor;
+        // Use the scheme's semantic "active block line" color — it is already
+        // calibrated per-theme to be distinct from the cursor color.
+        lineColor = cs.blockLineActive;
       } else if (blt.colorMode == BlockLineColorMode.rainbow && blt.rainbowColors.isNotEmpty) {
         lineColor = blt.rainbowColors[depth % blt.rainbowColors.length];
         lineColor = lineColor.withOpacity((lineColor.opacity * blt.inactiveOpacity).clamp(0.0, 1.0));
@@ -3594,7 +3960,52 @@ class _EditorViewport extends LeafRenderObjectWidget {
         );
       }
 
-      _execProgram(c, x, y1, y2, effectiveProg, paint, closerX: closerX);
+      // ── Guide "cut" logic ───────────────────────────────────────────────
+      // Only inspect rows that are actually visible (clamped to [fl, ll]).
+      // Rows outside the viewport are clipped by the canvas anyway, so
+      // iterating them would burn CPU for zero visual benefit — and for
+      // blocks that span the entire file this was O(lineCount) per block!
+      final segs = <(double, double)>[];
+      {
+        double segStart = y1;
+        bool drawing = true;
+        final viStart = math.max(startViActual + 1, fl);
+        final viEnd   = math.min(endViActual, ll + 1);
+        for (int vi = viStart; vi < viEnd; vi++) {
+          if (vi >= _vis.length) break;
+          final lt = _ctrl.content.getLineText(_vis[vi]);
+          final blocked = firstCharCol < lt.length &&
+              lt[firstCharCol] != ' ' && lt[firstCharCol] != '\t';
+          final rowTop = off.dy + _rowY(vi) - sY;
+          final rowBot = rowTop + _rowH(vi);
+          if (blocked) {
+            if (drawing && segStart < rowTop) segs.add((segStart, rowTop));
+            drawing = false;
+            segStart = rowBot;
+          } else if (!drawing) {
+            segStart = rowTop;
+            drawing = true;
+          }
+        }
+        if (drawing && segStart < y2) segs.add((segStart, y2));
+      }
+      if (segs.isEmpty) segs.add((y1, y2));
+
+      for (int si = 0; si < segs.length; si++) {
+        final sy = segs[si].$1;
+        final ey = segs[si].$2;
+        if (ey <= sy) continue;
+        final isFirst = si == 0;
+        final isLast  = si == segs.length - 1;
+        final segProg = (isFirst && isLast)
+            ? effectiveProg
+            : IndentLineProgram(
+                ops:      effectiveProg.ops,
+                startCap: isFirst ? effectiveProg.startCap : IndentLineCap.none,
+                endCap:   isLast  ? effectiveProg.endCap   : IndentLineCap.none,
+              );
+        _execProgram(c, x, sy, ey, segProg, paint, closerX: closerX);
+      }
     }
   }
 
@@ -3915,6 +4326,46 @@ class _EditorViewport extends LeafRenderObjectWidget {
     bool up = false; double x = x1;
     while (x < x2) { final nx = math.min(x + wl, x2); path.quadraticBezierTo((x+nx)/2, y+(up?-amp:amp), nx, y); up=!up; x=nx; }
     _pDiag.color = col; c.drawPath(path, _pDiag);
+  }
+
+  // ── Color decorators ──────────────────────────────────────────────────────
+  // Per-line color cache (in RenderBox to avoid extra prop plumbing).
+  final Map<int, List<ColorMatch>> _colorDecoCache = {};
+  int _colorDecoCacheVer = -1;
+
+  List<ColorMatch> _colorMatchesForVi(int vi) {
+    if (vi >= _vis.length) return const [];
+    final line = _vis[vi];
+    final ver  = _ctrl.content.documentVersion;
+    if (ver != _colorDecoCacheVer) { _colorDecoCache.clear(); _colorDecoCacheVer = ver; }
+    return _colorDecoCache.putIfAbsent(line,
+        () => ColorDetector.detect(_ctrl.content.getLineText(line)));
+  }
+
+  void _paintColorDecorators(Canvas c, Offset off, double sY, double sX, int fl, int ll) {
+    if (!_ctrl.props.showColorDecorators) return;
+    final fill   = Paint()..style = PaintingStyle.fill;
+    final border = Paint()..style = PaintingStyle.stroke..strokeWidth = 0.7
+        ..color = const Color(0x66000000);
+    for (int vi = fl; vi <= ll; vi++) {
+      if (vi >= _vis.length) break;
+      final matches = _colorMatchesForVi(vi);
+      if (matches.isEmpty) continue;
+      final rowTop = off.dy + _rowY(vi) - sY;
+      final cy     = rowTop + (_rowH(vi) - _swatchSize) / 2;
+      for (final m in matches) {
+        final textX = off.dx + _gw + _codePad + m.start * cw - sX;
+        final sx    = textX - _swatchSize - _swatchRightGap - _swatchLeftGap;
+        if (sx + _swatchSize < off.dx + _gw) continue; // scrolled behind gutter
+        // Text in [sx - leftGap .. textX] was already clipped out in the paint
+        // loop above, so no erase needed — just draw the swatch.
+        final rect = Rect.fromLTWH(sx, cy, _swatchSize, _swatchSize);
+        final rr   = RRect.fromRectAndRadius(rect, const Radius.circular(2));
+        fill.color = m.color;
+        c.drawRRect(rr, fill);
+        c.drawRRect(rr, border);
+      }
+    }
   }
 
   void _paintCursor(Canvas c, Offset off, EditorColorScheme cs, double sY, double sX, int vi) {

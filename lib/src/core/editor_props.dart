@@ -22,7 +22,9 @@ class EditorProps {
   int stickyScrollMaxLines = 3;
 
   bool autoCompletion = true;
-  bool showMinimap   = true;
+  bool showMinimap        = true;
+  bool showScrollbars     = true;
+  bool showColorDecorators = true;
   bool showLightbulb  = true;
 
   bool readOnly = false;

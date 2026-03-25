@@ -165,12 +165,19 @@ class VsCodeThemeParser {
           ? _parseIndentDotTheme(idJson)
           : null;
 
+      // ── scrollbar ────────────────────────────────────────────────────────
+      final sbJson = root['scrollbar'] as Map<String, dynamic>?;
+      final parsedScrollbar = sbJson != null
+          ? _parseScrollbarTheme(sbJson)
+          : null;
+
       return DarkEditorTheme.theme.copyWith(
         colorScheme:  cs,
         cursorWidth:  cursorW,
         blockLines:   parsedBlockLines,
         bracketPair:  parsedBracketPair,
         indentDots:   parsedIndentDots,
+        scrollbar:    parsedScrollbar,
       );
     } catch (e) {
       return DarkEditorTheme.theme;
@@ -251,6 +258,19 @@ class VsCodeThemeParser {
       mode:    mode,
     );
   }
+
+  static ScrollbarTheme _parseScrollbarTheme(Map<String, dynamic> m) =>
+    ScrollbarTheme(
+      thickness:       (m['thickness']       as num?)?.toDouble() ?? 6.0,
+      radius:          (m['radius']          as num?)?.toDouble() ?? 3.0,
+      thumbColor:      _parseHex(m['thumbColor']  as String? ?? ''),
+      trackColor:      _parseHex(m['trackColor']  as String? ?? ''),
+      borderColor:     _parseHex(m['borderColor'] as String? ?? ''),
+      borderWidth:     (m['borderWidth']     as num?)?.toDouble() ?? 0.0,
+      showTrack:       (m['showTrack']       as bool?) ?? true,
+      minThumbLength:  (m['minThumbLength']  as num?)?.toDouble() ?? 20.0,
+      autoHideSeconds: (m['autoHideSeconds'] as num?)?.toDouble() ?? 2.0,
+    );
 
   // ── Build token → color map from tokenColors array ───────────────────────
 

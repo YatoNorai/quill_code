@@ -70,6 +70,7 @@ export 'src/theme/theme_light.dart';
 export 'src/theme/theme_github.dart';
 export 'src/theme/theme_monokai.dart';
 export 'src/theme/theme_dracula.dart';
+export 'src/theme/theme_neon.dart';
 
 export 'src/events/editor_event.dart';
 export 'src/events/event_manager.dart';

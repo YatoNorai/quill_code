@@ -234,6 +234,73 @@ class IndentDotTheme {
 
 enum IndentDotMode { indentOnly, all }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ScrollbarTheme
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Theme for the overlay scrollbars rendered by the editor.
+///
+/// Colors default to `null`, meaning the editor falls back to
+/// `EditorColorScheme.scrollBarThumb` / `scrollBarTrack`.
+class ScrollbarTheme {
+  /// Width of the vertical bar / height of the horizontal bar, in logical pixels.
+  final double thickness;
+  /// Corner radius of the thumb rectangle.
+  final double radius;
+  /// Thumb fill color.  `null` → uses `EditorColorScheme.scrollBarThumb`.
+  final Color? thumbColor;
+  /// Track fill color.  `null` → uses `EditorColorScheme.scrollBarTrack`.
+  final Color? trackColor;
+  /// Optional border drawn around the thumb.  `null` → no border.
+  final Color? borderColor;
+  /// Width of the thumb border.
+  final double borderWidth;
+  /// Whether to paint the track behind the thumb.
+  final bool showTrack;
+  /// Minimum thumb length so it stays visible even on very long documents.
+  final double minThumbLength;
+  /// Seconds of idle scroll before the bars fade out.  0 → always visible.
+  final double autoHideSeconds;
+
+  const ScrollbarTheme({
+    this.thickness      = 6.0,
+    this.radius         = 3.0,
+    this.thumbColor,
+    this.trackColor,
+    this.borderColor,
+    this.borderWidth    = 0.0,
+    this.showTrack      = false,
+    this.minThumbLength = 20.0,
+    this.autoHideSeconds = 2.0,
+  });
+
+  ScrollbarTheme copyWith({
+    double? thickness, double? radius,
+    Color?  thumbColor, Color?  trackColor, Color?  borderColor,
+    double? borderWidth, bool?  showTrack,  double? minThumbLength,
+    double? autoHideSeconds,
+  }) => ScrollbarTheme(
+    thickness:       thickness       ?? this.thickness,
+    radius:          radius          ?? this.radius,
+    thumbColor:      thumbColor      ?? this.thumbColor,
+    trackColor:      trackColor      ?? this.trackColor,
+    borderColor:     borderColor     ?? this.borderColor,
+    borderWidth:     borderWidth     ?? this.borderWidth,
+    showTrack:       showTrack       ?? this.showTrack,
+    minThumbLength:  minThumbLength  ?? this.minThumbLength,
+    autoHideSeconds: autoHideSeconds ?? this.autoHideSeconds,
+  );
+
+  @override bool operator ==(Object o) => identical(this, o) || o is ScrollbarTheme &&
+    o.thickness == thickness && o.radius == radius &&
+    o.thumbColor == thumbColor && o.trackColor == trackColor &&
+    o.borderColor == borderColor && o.borderWidth == borderWidth &&
+    o.showTrack == showTrack && o.minThumbLength == minThumbLength &&
+    o.autoHideSeconds == autoHideSeconds;
+  @override int get hashCode => Object.hash(thickness, radius, thumbColor, trackColor,
+    borderColor, borderWidth, showTrack, minThumbLength, autoHideSeconds);
+}
+
 class EditorTheme {
   final EditorColorScheme colorScheme;
   final String            fontFamily;
@@ -244,6 +311,7 @@ class EditorTheme {
   final BlockLineTheme    blockLines;
   final BracketPairTheme  bracketPair;
   final IndentDotTheme    indentDots;
+  final ScrollbarTheme    scrollbar;
 
   const EditorTheme({
     required this.colorScheme,
@@ -251,10 +319,11 @@ class EditorTheme {
     this.fontSize      = 14.0,
     this.lineHeight    = 1.5,
     this.letterSpacing = 0.0,
-    this.cursorWidth   = 2.0,
+    this.cursorWidth   = 1.5,
     this.blockLines    = const BlockLineTheme(),
     this.bracketPair   = const BracketPairTheme(),
     this.indentDots    = const IndentDotTheme(),
+    this.scrollbar     = const ScrollbarTheme(),
   });
 
   double get lineHeightPx => fontSize * lineHeight;
@@ -263,7 +332,8 @@ class EditorTheme {
     EditorColorScheme? colorScheme, String? fontFamily,
     double? fontSize, double? lineHeight, double? letterSpacing,
     double? cursorWidth,
-    BlockLineTheme? blockLines, BracketPairTheme? bracketPair, IndentDotTheme? indentDots,
+    BlockLineTheme? blockLines, BracketPairTheme? bracketPair,
+    IndentDotTheme? indentDots, ScrollbarTheme? scrollbar,
   }) => EditorTheme(
     colorScheme:   colorScheme   ?? this.colorScheme,
     fontFamily:    fontFamily    ?? this.fontFamily,
@@ -274,13 +344,15 @@ class EditorTheme {
     blockLines:    blockLines    ?? this.blockLines,
     bracketPair:   bracketPair   ?? this.bracketPair,
     indentDots:    indentDots    ?? this.indentDots,
+    scrollbar:     scrollbar     ?? this.scrollbar,
   );
 
   @override bool operator ==(Object o) => identical(this,o) ||
     o is EditorTheme && o.colorScheme==colorScheme && o.fontFamily==fontFamily &&
     o.fontSize==fontSize && o.lineHeight==lineHeight && o.letterSpacing==letterSpacing &&
     o.cursorWidth==cursorWidth &&
-    o.blockLines==blockLines && o.bracketPair==bracketPair && o.indentDots==indentDots;
+    o.blockLines==blockLines && o.bracketPair==bracketPair &&
+    o.indentDots==indentDots && o.scrollbar==scrollbar;
   @override int get hashCode => Object.hash(colorScheme,fontFamily,fontSize,
-    lineHeight,letterSpacing,cursorWidth,blockLines,bracketPair,indentDots);
+    lineHeight,letterSpacing,cursorWidth,blockLines,bracketPair,indentDots,scrollbar);
 }
