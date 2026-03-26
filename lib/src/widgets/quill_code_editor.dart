@@ -21,7 +21,6 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:math' as math;
-import 'dart:ui' show ClipOp;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -253,6 +252,14 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   double get _lh => _effectiveTheme.lineHeightPx;
   double get _cw => _effectiveTheme.fontSize * 0.601;
 
+  // Base font size before any pinch-zoom — overlays use this so they don't
+  // scale when the user zooms the code text.
+  double _baseFontSize = 14.0;
+  EditorTheme get _overlayTheme =>
+      identical(_baseFontSize, _effectiveTheme.fontSize)
+          ? _effectiveTheme
+          : _effectiveTheme.copyWith(fontSize: _baseFontSize);
+
   double _calcGw() {
     final ctrl     = widget.controller;
     final digits   = ctrl.content.lineCount.toString().length;
@@ -334,6 +341,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   void initState() {
     super.initState();
     _effectiveTheme = widget.theme ?? QuillThemeDark.build();
+    _baseFontSize   = _effectiveTheme.fontSize;
     _focus = widget.focusNode ?? FocusNode();
     _blink = AnimationController(vsync: this, duration: Duration(milliseconds: widget.controller.props.cursorBlinkIntervalMs))
       ..addStatusListener((s) {
@@ -441,6 +449,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
       _effectiveTheme = baseFsChanged
           ? newBase                                          // usuário mudou via +/−
           : newBase.copyWith(fontSize: _effectiveTheme.fontSize); // preserva zoom do pinch
+      if (baseFsChanged) _baseFontSize = newBase.fontSize;
       // Sincroniza _zoomN para que _onZoomChanged → _calcGw → _gwN fiquem coerentes.
       if (!baseFsChanged) _zoomN.value = _effectiveTheme.fontSize;
     }
@@ -1812,7 +1821,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
                       child: ConstrainedBox(
                         constraints: BoxConstraints(maxWidth: availW, maxHeight: popupH), // popupH = 160
                         child: CompletionPopup(
-                            controller: ctrl, theme: theme, selectedIndex: _completionIdx),
+                            controller: ctrl, theme: _overlayTheme, selectedIndex: _completionIdx),
                       ),
                     );
                   },
@@ -1828,7 +1837,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
                     if (ctrl.isCompletionVisible) return const SizedBox.shrink();
                     final diag = ctrl.diagnostics.atPosition(ctrl.cursor.position);
                     if (diag == null) return const SizedBox.shrink();
-                    return _diagTooltip(diag, ctrl.cursor.position, theme, cs);
+                    return _diagTooltip(diag, ctrl.cursor.position, _overlayTheme, cs);
                   },
                 ),
 
@@ -1838,7 +1847,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
                   builder: (_, __) {
                     final mp = _magnifierPos;
                     if (mp == null || _drag != 'cursor') return const SizedBox.shrink();
-                    return _buildMagnifier(mp, ctrl, theme, cs);
+                    return _buildMagnifier(mp, ctrl, _overlayTheme, cs);
                   },
                 ),
 
@@ -1855,7 +1864,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
                         final anchor = _charToLocal(pos);
                         return LightbulbWidget(
                           controller:    ctrl,
-                          theme:         theme,
+                          theme:         _overlayTheme,
                           cursorLocal:   anchor,
                           gutterWidth:   _gw,
                           lineHeight:    _lh,
@@ -1879,7 +1888,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
                     final anchor = _charToLocal(sym.nameRange.start);
                     return SymbolInfoPanel(
                       symbol:         sym,
-                      theme:          theme,
+                      theme:          _overlayTheme,
                       anchorLocal:    anchor,
                       lineHeight:     _lh,
                       viewportWidth:  _vpSize.width,
@@ -1911,7 +1920,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
                       final anchor = _charToLocal(pos);
                       return LspHoverPanel(
                         contents:       _lspHoverText!,
-                        theme:          theme,
+                        theme:          _overlayTheme,
                         anchorLocal:    anchor,
                         lineHeight:     _lh,
                         viewportWidth:  _vpSize.width,
@@ -1930,7 +1939,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
                       final anchor = _charToLocal(pos);
                       return LspSignaturePanel(
                         sigHelp:        _lspSigHelp!,
-                        theme:          theme,
+                        theme:          _overlayTheme,
                         anchorLocal:    anchor,
                         lineHeight:     _lh,
                         viewportWidth:  _vpSize.width,
@@ -2199,7 +2208,9 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   }) {
     // Native handle size: Material spec is 22×22 circle with 22px line = ~44 total
     const handleSize = Size(22.0, 22.0);
-    final lineHeight = _lh;
+    // Use base (unzoomed) line height so handle size stays constant when user
+    // pinch-zooms the code text.
+    final lineHeight = _baseFontSize * (_effectiveTheme.lineHeightPx / _effectiveTheme.fontSize);
 
     // Build the native Material handle widget, optionally with custom color
     final handleCol = widget.controller.props.handleColor
@@ -3500,22 +3511,31 @@ class _EditorViewport extends LeafRenderObjectWidget {
       if (_ctrl.props.showColorDecorators) {
         final matches = _colorMatchesForVi(vi);
         if (matches.isNotEmpty) {
-          // Clip-exclude the swatch + gap zones so text is never drawn there.
-          // This creates genuine blank space without erasing any background.
-          c.save();
+          // Paint the line in segments, skipping swatch zones, using only
+          // ClipOp.intersect (universally supported on all GPU drivers).
+          final right = off.dx + size.width;
+          double segL = off.dx; // left edge of the current allowed segment
           for (final m in matches) {
-            final textX  = off.dx + _gw + _codePad + m.start * cw - sX;
-            // Exclude: from leftGap before swatch to color-text start.
-            final zoneL  = math.max(textX - _swatchSize - _swatchRightGap - _swatchLeftGap,
-                                    off.dx + _gw);
-            final zoneR  = textX;
-            if (zoneR > zoneL) {
-              c.clipRect(Rect.fromLTRB(zoneL, off.dy, zoneR, off.dy + size.height),
-                         clipOp: ClipOp.difference);
+            final textX = off.dx + _gw + _codePad + m.start * cw - sX;
+            final zoneL = math.max(
+                textX - _swatchSize - _swatchRightGap - _swatchLeftGap,
+                off.dx + _gw);
+            final zoneR = textX;
+            if (zoneL > segL) {
+              c.save();
+              c.clipRect(Rect.fromLTRB(segL, off.dy, zoneL, off.dy + size.height));
+              _paintLine(c, off, cs, vi, sY, sX);
+              c.restore();
             }
+            segL = zoneR; // next segment starts after this zone
           }
-          _paintLine(c, off, cs, vi, sY, sX);
-          c.restore();
+          // Final segment: from last zone end to right edge
+          if (segL < right) {
+            c.save();
+            c.clipRect(Rect.fromLTRB(segL, off.dy, right, off.dy + size.height));
+            _paintLine(c, off, cs, vi, sY, sX);
+            c.restore();
+          }
           continue;
         }
       }
@@ -3523,12 +3543,15 @@ class _EditorViewport extends LeafRenderObjectWidget {
     }
     if (_ctrl.props.showDiagnosticIndicators) _paintDiag(c, off, cs, sY, sX, fl, ll);
     _paintGhostText(c, off, cs, sY, sX, fl, ll);
+    if (!_ctrl.props.fixedLineNumbers && _gw > 0) _paintGutter(c, off, cs, sY, sX, fl, ll);
+    _paintColorDecorators(c, off, sY, sX, fl, ll);
+    // Cursor is painted last so it always renders on top of text, swatches and
+    // gutter — important on Android GPUs where intermediate save/restore layers
+    // can cause earlier drawLine calls to composite under subsequent draws.
     if (_showCursor) {
       final ci = _vi(_ctrl.cursor.line);
       if (ci >= fl && ci <= ll) _paintCursor(c, off, cs, sY, sX, ci);
     }
-    if (!_ctrl.props.fixedLineNumbers && _gw > 0) _paintGutter(c, off, cs, sY, sX, fl, ll);
-    _paintColorDecorators(c, off, sY, sX, fl, ll);
     c.restore();
   }
 

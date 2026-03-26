@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(flutter analyze:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(grep -iv \"//.*overlay\\\\|//.*toolbar\\\\|//.*handle\\\\|//.*magnif\")",
+      "Bash(xargs grep:*)"
     ]
   }
 }
