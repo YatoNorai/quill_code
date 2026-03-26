@@ -105,11 +105,3 @@ export 'src/widgets/actions_menu_widget.dart';
 export 'src/theme/theme_dark_modern.dart';
 export 'src/theme/theme_github_dark.dart';
 
-// ── Tree-sitter (Android FFI) ──────────────────────────────────────────────
-export 'src/tree_sitter/ts_ffi.dart'           show QuillTsLib;
-export 'src/tree_sitter/ts_language.dart'      show TsLanguageMixin;
-export 'src/tree_sitter/ts_analyze_manager.dart' show TsAnalyzeManager;
-export 'src/tree_sitter/ts_parser.dart'        show TsParser, TsHighlightSpan;
-export 'src/tree_sitter/ts_token_mapper.dart'  show TsTokenMapper;
-export 'src/tree_sitter/ts_symbol.dart';
-export 'src/tree_sitter/ts_semantic.dart' show TsSemantic;
