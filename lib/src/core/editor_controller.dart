@@ -3,6 +3,7 @@
 // a full widget rebuild; only the layers that need it repaint.
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart';
 import 'char_position.dart';
 import 'cursor.dart';
 import 'editor_props.dart';
@@ -33,6 +34,24 @@ import '../tree_sitter/ts_semantic.dart';
 import '../tree_sitter/ts_symbol.dart';
 
 class QuillCodeController extends ChangeNotifier {
+  // ── Safe notifyListeners ───────────────────────────────────────────────
+  /// Calls [notifyListeners] immediately when called outside of Flutter's
+  /// build/layout/paint phase. If called *during* the build phase (e.g. from
+  /// a widget's [build] method or a [builder] callback), defers the
+  /// notification to a post-frame callback to avoid "setState during build".
+  @override
+  void notifyListeners() {
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        if (!hasListeners) return; // guard in case disposed between frames
+        super.notifyListeners();
+      });
+    } else {
+      super.notifyListeners();
+    }
+  }
+
   // ── Granular notifiers ─────────────────────────────────────────────────
   /// Fires only when cursor position or selection changes (no text change).
   final ValueNotifier<int> cursorVersion  = ValueNotifier(0);
