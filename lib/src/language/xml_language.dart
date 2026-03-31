@@ -1,14 +1,9 @@
 // lib/src/language/xml_language.dart
 import '../highlighting/span.dart';
 import '_regex_language.dart';
-import '../tree_sitter/ts_language.dart';
-
-
-class XmlLanguage extends RegexLanguage with TsLanguageMixin {
+class XmlLanguage extends RegexLanguage {
   @override
   String get name => 'XML';
-  @override
-  String get tsName => 'xml';
 
   @override
   List<TokenRule> get rules => [

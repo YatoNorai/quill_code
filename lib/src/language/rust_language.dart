@@ -1,14 +1,9 @@
 // lib/src/language/rust_language.dart
 import '../highlighting/span.dart';
 import '_regex_language.dart';
-import '../tree_sitter/ts_language.dart';
-
-
-class RustLanguage extends RegexLanguage with TsLanguageMixin {
+class RustLanguage extends RegexLanguage {
   @override
   String get name => 'Rust';
-  @override
-  String get tsName => 'rust';
 
   static const _kw = [
     'as','async','await','break','const','continue','crate','dyn','else',

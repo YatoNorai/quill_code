@@ -1,14 +1,9 @@
 // lib/src/language/cpp_language.dart
 import '../highlighting/span.dart';
 import '_regex_language.dart';
-import '../tree_sitter/ts_language.dart';
-
-
-class CppLanguage extends RegexLanguage with TsLanguageMixin {
+class CppLanguage extends RegexLanguage {
   @override
   String get name => 'C++';
-  @override
-  String get tsName => 'cpp';
 
   static const _kw = [
     'alignas','alignof','and','asm','auto','bool','break','case','catch',

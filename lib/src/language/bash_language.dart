@@ -1,17 +1,11 @@
 // lib/src/language/bash_language.dart
 import '../highlighting/span.dart';
 import '_regex_language.dart';
-import '../tree_sitter/ts_language.dart';
-
-
-class BashLanguage extends RegexLanguage with TsLanguageMixin {
-  @override
-
+class BashLanguage extends RegexLanguage {
   @override
   String get lineCommentPrefix => '#';
-  String get name => 'Bash';
   @override
-  String get tsName => 'bash';
+  String get name => 'Bash';
 
   static const _kw = [
     'if','then','else','elif','fi','case','esac','for','while','until',

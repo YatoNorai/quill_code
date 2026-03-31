@@ -2,17 +2,11 @@
 import '../native/quill_native.dart';
 import '../highlighting/span.dart';
 import '_regex_language.dart';
-import '../tree_sitter/ts_language.dart';
-
-
-class PythonLanguage extends RegexLanguage with TsLanguageMixin {
-  @override
-
+class PythonLanguage extends RegexLanguage {
   @override
   String get lineCommentPrefix => '#';
-  String get name => 'Python';
   @override
-  String get tsName => 'python';
+  String get name => 'Python';
 
   static const _kw = [
     'and','as','assert','async','await','break','class','continue','def',

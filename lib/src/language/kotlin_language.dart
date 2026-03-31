@@ -1,14 +1,9 @@
 // lib/src/language/kotlin_language.dart
 import '../highlighting/span.dart';
 import '_regex_language.dart';
-import '../tree_sitter/ts_language.dart';
-
-
-class KotlinLanguage extends RegexLanguage with TsLanguageMixin {
+class KotlinLanguage extends RegexLanguage {
   @override
   String get name => 'Kotlin';
-  @override
-  String get tsName => 'kotlin';
 
   static const _kw = [
     'as','break','class','continue','do','else','false','for','fun','if',

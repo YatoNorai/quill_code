@@ -1,14 +1,9 @@
 // lib/src/language/html_language.dart
 import '../highlighting/span.dart';
 import '_regex_language.dart';
-import '../tree_sitter/ts_language.dart';
-
-
-class HtmlLanguage extends RegexLanguage with TsLanguageMixin {
+class HtmlLanguage extends RegexLanguage {
   @override
   String get name => 'HTML';
-  @override
-  String get tsName => 'html';
 
   @override
   List<TokenRule> get rules => [

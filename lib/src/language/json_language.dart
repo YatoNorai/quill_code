@@ -1,14 +1,9 @@
 // lib/src/language/json_language.dart
 import '../highlighting/span.dart';
 import '_regex_language.dart';
-import '../tree_sitter/ts_language.dart';
-
-
-class JsonLanguage extends RegexLanguage with TsLanguageMixin {
+class JsonLanguage extends RegexLanguage {
   @override
   String get name => 'JSON';
-  @override
-  String get tsName => 'json';
 
   @override
   List<TokenRule> get rules => [

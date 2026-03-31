@@ -1,16 +1,11 @@
 // lib/src/language/yaml_language.dart
 import '../highlighting/span.dart';
 import '_regex_language.dart';
-import '../tree_sitter/ts_language.dart';
-
-
-class YamlLanguage extends RegexLanguage with TsLanguageMixin {
+class YamlLanguage extends RegexLanguage {
   @override
   String get name => 'YAML';
   @override
   String get lineCommentPrefix => '#';
-  @override
-  String get tsName => 'yaml';
 
   @override
   List<TokenRule> get rules => [

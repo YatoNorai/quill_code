@@ -27,11 +27,10 @@ import '../events/event_manager.dart';
 import '../lsp/lsp_bridge.dart';
 import '../lsp/lsp_controller_mixin.dart';
 import '../lsp/lsp_stdio_client.dart';
+import '../lsp/lsp_socket_client.dart';
 import '../actions/code_action.dart';
 import '../completion/ghost_text_controller.dart';
-import '../tree_sitter/ts_analyze_manager.dart' show TsAnalyzeManager, TsDiagEntry;
-import '../tree_sitter/ts_semantic.dart';
-import '../tree_sitter/ts_symbol.dart';
+
 
 class QuillCodeController extends ChangeNotifier {
   // ── Safe notifyListeners ───────────────────────────────────────────────
@@ -382,40 +381,23 @@ class QuillCodeController extends ChangeNotifier {
         ? _cursor.selection
         : EditorRange.collapsed(_cursor.position);
 
-    final result = TsSemantic.expandSelection(
-        src, lang,
-        sel.start.line, sel.start.column,
-        sel.end.line,   sel.end.column);
-
-    if (result != null) {
-      _cursor.setSelection(
-          CharPosition(result.$1, result.$2),
-          CharPosition(result.$3, result.$4));
-      _bumpCursor();
-      notifyListeners();
+    // word → line → all
+    if (!_cursor.hasSelection) {
+      selectWord();
     } else {
-      // Fallback: word → line → all
-      if (!_cursor.hasSelection) {
-        selectWord();
-      } else {
-        final sel2 = _cursor.selection;
-        if (sel2.start.line == sel2.end.line) selectLine();
-        else selectAll();
-      }
+      final sel2 = _cursor.selection;
+      if (sel2.start.line == sel2.end.line) selectLine();
+      else selectAll();
     }
   }
 
-  /// Returns named symbols in the current document (functions, classes, etc.).
-  List<TsSymbol> getSymbols() {
-    return TsSemantic.extractSymbols(_content.fullText, _language.name.toLowerCase());
+  /// Returns named symbols in the current document.
+  /// Always empty without tree-sitter; LSP provides symbols via hover/completion.
+  List<Map<String, dynamic>> getSymbols() {
+    return const [];
   }
 
-  /// Pushes tree-sitter syntax errors as diagnostics.
-  void updateSyntaxDiagnostics() {
-    final diags = TsSemantic.extractDiagnostics(
-        _content.fullText, _language.name.toLowerCase());
-    if (diags.isNotEmpty) setDiagnostics(diags);
-  }
+
 
   /// Move cursor without triggering completion — only bumps cursorVersion.
   void setCursor(CharPosition pos, {bool select = false}) {
@@ -495,17 +477,19 @@ class QuillCodeController extends ChangeNotifier {
     // (which arrive asynchronously, not via polling).
     _lspDiagSub?.cancel();
     _lspDiagSub = null;
+    void onDiags(List<LspDiagnostic> lspDiags) {
+      setDiagnostics(lspDiags.map((d) => DiagnosticRegion(
+        range: d.range, message: d.message, severity: d.severity,
+        source: d.source, code: d.code,
+      )).toList());
+    }
     final rawClient = client;
     if (rawClient is LspStdioClient) {
-      // listenDiagnostics returns a StreamSubscription<List<LspDiagnostic>>.
-      // Cast to dynamic since _lspDiagSub is StreamSubscription<dynamic>.
-      final sub = rawClient.listenDiagnostics(uri, (lspDiags) {
-        setDiagnostics(lspDiags.map((d) => DiagnosticRegion(
-          range: d.range, message: d.message, severity: d.severity,
-          source: d.source, code: d.code,
-        )).toList());
-      });
-      _lspDiagSub = sub as StreamSubscription<dynamic>;
+      _lspDiagSub = rawClient.listenDiagnostics(uri, onDiags)
+          as StreamSubscription<dynamic>;
+    } else if (rawClient is LspSocketClient) {
+      _lspDiagSub = rawClient.listenDiagnostics(uri, onDiags)
+          as StreamSubscription<dynamic>;
     }
   }
 
@@ -611,21 +595,6 @@ class QuillCodeController extends ChangeNotifier {
     _analyzeManager.onTokenizationComplete = () {
       // tokenizationVersion already bumped in onStylesUpdated above.
     };
-    // Wire tree-sitter syntax diagnostics if the manager supports it
-    if (_analyzeManager is TsAnalyzeManager) {
-      (_analyzeManager as TsAnalyzeManager).onDiagnosticsUpdated = (entries) {
-        if (!_props.showDiagnosticIndicators) return;
-        final regions = entries.map((e) => DiagnosticRegion(
-          range: EditorRange(
-              CharPosition(e.startLine, e.startCol),
-              CharPosition(e.endLine,   e.endCol)),
-          severity: DiagnosticSeverity.error,
-          message:  'Syntax error',
-          source:   'tree-sitter',
-        )).toList();
-        setDiagnostics(regions);
-      };
-    }
     _analyzeManager.init(_content);
   }
 

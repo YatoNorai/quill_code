@@ -2,14 +2,9 @@
 import '../native/quill_native.dart';
 import '../highlighting/span.dart';
 import '_regex_language.dart';
-import '../tree_sitter/ts_language.dart';
-
-
-class DartLanguage extends RegexLanguage with TsLanguageMixin {
+class DartLanguage extends RegexLanguage {
   @override
   String get name => 'Dart';
-  @override
-  String get tsName => 'dart';
 
   static const _kw = [
     'abstract','as','assert','async','await','base','break','case','catch',

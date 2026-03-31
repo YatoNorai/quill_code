@@ -1,14 +1,9 @@
 // lib/src/language/javascript_language.dart
 import '../highlighting/span.dart';
 import '_regex_language.dart';
-import '../tree_sitter/ts_language.dart';
-
-
-class JavaScriptLanguage extends RegexLanguage with TsLanguageMixin {
+class JavaScriptLanguage extends RegexLanguage {
   @override
   String get name => 'JavaScript';
-  @override
-  String get tsName => 'javascript';
 
   static const _kw = [
     'async','await','break','case','catch','class','const','continue',

@@ -1,16 +1,11 @@
 // lib/src/language/css_language.dart
 import '../highlighting/span.dart';
 import '_regex_language.dart';
-import '../tree_sitter/ts_language.dart';
-
-
-class CssLanguage extends RegexLanguage with TsLanguageMixin {
+class CssLanguage extends RegexLanguage {
   @override
   String get name => 'CSS';
   @override
   String get lineCommentPrefix => '/* */';
-  @override
-  String get tsName => 'css';
 
   @override
   List<TokenRule> get rules => [

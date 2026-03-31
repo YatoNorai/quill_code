@@ -436,6 +436,39 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
       // per file), treat it exactly like setText(): reset scroll + gutter.
       _onScrollReset();
     }
+    // If lspConfig changed (e.g. SSH LSP starts after the editor is built),
+    // attach the new LSP client without recreating the whole widget.
+    if (old.lspConfig != widget.lspConfig && widget.lspConfig != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted) return;
+        final cfg = widget.lspConfig!;
+        LspClient? client;
+        if (cfg is QuillLspStdioConfig) {
+          client = await LspStdioClient.start(
+            executable:    cfg.executable,
+            args:          cfg.args,
+            workspacePath: cfg.workspacePath,
+            languageId:    cfg.languageId,
+            environment:   cfg.environment,
+          );
+        } else if (cfg is QuillLspSocketConfig) {
+          final sc = LspSocketClient(
+            serverUrl:     cfg.url,
+            workspacePath: cfg.workspacePath,
+            languageId:    cfg.languageId,
+          );
+          await sc.connect();
+          client = sc;
+        }
+        if (!mounted || client == null) return;
+        final langId = cfg.languageId;
+        widget.controller.attachLsp(
+          client,
+          uri:        widget.fileUri ?? 'file:///untitled.$langId',
+          languageId: langId,
+        );
+      });
+    }
     // Se o host mudou o tema externamente (ex: troca de arquivo/linguagem),
     // adota as novas cores/fontes MAS preserva o fontSize atual do usuário,
     // A menos que o próprio tema tenha mudado o fontSize (ex: usuário clicou
@@ -518,7 +551,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
         inputAction: TextInputAction.newline,
         enableSuggestions: false,
         autocorrect: false,
-        enableIMEPersonalizedLearning: false,
+        enableIMEPersonalizedLearning: true,
       ));
     }
     // Tell the IME the current editing state so Android enables the
