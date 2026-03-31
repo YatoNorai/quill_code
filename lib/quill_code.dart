@@ -82,6 +82,8 @@ export 'src/widgets/diagnostics_panel.dart';
 export 'src/widgets/search_bar_widget.dart';
 export 'src/widgets/symbol_input_bar.dart';
 export 'src/widgets/minimap_widget.dart';
+export 'src/widgets/status_bar_widget.dart';
+export 'src/widgets/breadcrumbs_widget.dart';
 
 export 'src/actions/code_action.dart';
 export 'src/actions/code_action_provider.dart';

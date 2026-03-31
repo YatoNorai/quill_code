@@ -36,6 +36,12 @@ class CodeEditorRenderObject extends RenderBox {
   double _cursorAlpha = 1.0;
   int _lastDocVersion = -1;
 
+  // ── Bracket colorization cache ────────────────────────────────────────────
+  // Recomputed once per documentVersion change; keyed line → (col, depth).
+  // depth == -1 → mismatched bracket. Avoids re-scanning on every paint call.
+  int _bracketDepthVersion = -1;
+  Map<int, List<({int col, int depth})>> _bracketDepthMap = const {};
+
   CodeEditorRenderObject({
     required QuillCodeController controller,
     required EditorTheme theme,

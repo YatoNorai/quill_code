@@ -177,6 +177,55 @@ class BlockLineTheme {
 // BracketPairTheme / IndentDotTheme / EditorTheme — unchanged
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// BracketColorizationTheme
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Colors each bracket nesting level with a distinct color — VSCode-style.
+class BracketColorizationTheme {
+  final bool        enabled;
+  /// One color per depth level. Cycled when depth exceeds the list length.
+  final List<Color> colors;
+  /// Color used for mismatched (unmatched) brackets.
+  final Color       mismatchColor;
+
+  const BracketColorizationTheme({
+    this.enabled       = true,
+    this.colors        = defaultColors,
+    this.mismatchColor = const Color(0xFFFF4444),
+  });
+
+  static const List<Color> defaultColors = [
+    Color(0xFFFFD700), // gold
+    Color(0xFFDA70D6), // orchid
+    Color(0xFF87CEFA), // light sky blue
+    Color(0xFF98FB98), // pale green
+    Color(0xFFFFA07A), // light salmon
+    Color(0xFF87CEEB), // sky blue
+  ];
+
+  BracketColorizationTheme copyWith({
+    bool?        enabled,
+    List<Color>? colors,
+    Color?       mismatchColor,
+  }) => BracketColorizationTheme(
+    enabled:       enabled       ?? this.enabled,
+    colors:        colors        ?? this.colors,
+    mismatchColor: mismatchColor ?? this.mismatchColor,
+  );
+
+  @override bool operator ==(Object o) => identical(this, o) || o is BracketColorizationTheme &&
+    o.enabled == enabled && o.mismatchColor == mismatchColor &&
+    _listEq(o.colors, colors);
+  @override int get hashCode => Object.hash(enabled, Object.hashAll(colors), mismatchColor);
+
+  static bool _listEq(List<Color> a, List<Color> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) if (a[i] != b[i]) return false;
+    return true;
+  }
+}
+
 class BracketPairTheme {
   final Color  fillColor;
   final Color  borderColor;
@@ -302,49 +351,58 @@ class ScrollbarTheme {
 }
 
 class EditorTheme {
-  final EditorColorScheme colorScheme;
-  final String            fontFamily;
-  final double            fontSize;
-  final double            lineHeight;
-  final double            letterSpacing;
-  final double            cursorWidth;
-  final BlockLineTheme    blockLines;
-  final BracketPairTheme  bracketPair;
-  final IndentDotTheme    indentDots;
-  final ScrollbarTheme    scrollbar;
+  final EditorColorScheme           colorScheme;
+  final String                      fontFamily;
+  final double                      fontSize;
+  final double                      lineHeight;
+  final double                      letterSpacing;
+  final double                      cursorWidth;
+  final BlockLineTheme              blockLines;
+  final BracketPairTheme            bracketPair;
+  final BracketColorizationTheme    bracketColorization;
+  final IndentDotTheme              indentDots;
+  final ScrollbarTheme              scrollbar;
 
   const EditorTheme({
     required this.colorScheme,
-    this.fontFamily    = 'monospace',
-    this.fontSize      = 14.0,
-    this.lineHeight    = 1.5,
-    this.letterSpacing = 0.0,
-    this.cursorWidth   = 1.5,
-    this.blockLines    = const BlockLineTheme(),
-    this.bracketPair   = const BracketPairTheme(),
-    this.indentDots    = const IndentDotTheme(),
-    this.scrollbar     = const ScrollbarTheme(),
+    this.fontFamily          = 'monospace',
+    this.fontSize            = 14.0,
+    this.lineHeight          = 1.5,
+    this.letterSpacing       = 0.0,
+    this.cursorWidth         = 1.5,
+    this.blockLines          = const BlockLineTheme(),
+    this.bracketPair         = const BracketPairTheme(),
+    this.bracketColorization = const BracketColorizationTheme(),
+    this.indentDots          = const IndentDotTheme(),
+    this.scrollbar           = const ScrollbarTheme(),
   });
 
   double get lineHeightPx => fontSize * lineHeight;
 
   EditorTheme copyWith({
-    EditorColorScheme? colorScheme, String? fontFamily,
-    double? fontSize, double? lineHeight, double? letterSpacing,
-    double? cursorWidth,
-    BlockLineTheme? blockLines, BracketPairTheme? bracketPair,
-    IndentDotTheme? indentDots, ScrollbarTheme? scrollbar,
+    EditorColorScheme?          colorScheme,
+    String?                     fontFamily,
+    double?                     fontSize,
+    double?                     lineHeight,
+    double?                     letterSpacing,
+    double?                     cursorWidth,
+    BlockLineTheme?             blockLines,
+    BracketPairTheme?           bracketPair,
+    BracketColorizationTheme?   bracketColorization,
+    IndentDotTheme?             indentDots,
+    ScrollbarTheme?             scrollbar,
   }) => EditorTheme(
-    colorScheme:   colorScheme   ?? this.colorScheme,
-    fontFamily:    fontFamily    ?? this.fontFamily,
-    fontSize:      fontSize      ?? this.fontSize,
-    lineHeight:    lineHeight    ?? this.lineHeight,
-    letterSpacing: letterSpacing ?? this.letterSpacing,
-    cursorWidth:   cursorWidth   ?? this.cursorWidth,
-    blockLines:    blockLines    ?? this.blockLines,
-    bracketPair:   bracketPair   ?? this.bracketPair,
-    indentDots:    indentDots    ?? this.indentDots,
-    scrollbar:     scrollbar     ?? this.scrollbar,
+    colorScheme:         colorScheme         ?? this.colorScheme,
+    fontFamily:          fontFamily          ?? this.fontFamily,
+    fontSize:            fontSize            ?? this.fontSize,
+    lineHeight:          lineHeight          ?? this.lineHeight,
+    letterSpacing:       letterSpacing       ?? this.letterSpacing,
+    cursorWidth:         cursorWidth         ?? this.cursorWidth,
+    blockLines:          blockLines          ?? this.blockLines,
+    bracketPair:         bracketPair         ?? this.bracketPair,
+    bracketColorization: bracketColorization ?? this.bracketColorization,
+    indentDots:          indentDots          ?? this.indentDots,
+    scrollbar:           scrollbar           ?? this.scrollbar,
   );
 
   @override bool operator ==(Object o) => identical(this,o) ||
@@ -352,7 +410,9 @@ class EditorTheme {
     o.fontSize==fontSize && o.lineHeight==lineHeight && o.letterSpacing==letterSpacing &&
     o.cursorWidth==cursorWidth &&
     o.blockLines==blockLines && o.bracketPair==bracketPair &&
+    o.bracketColorization==bracketColorization &&
     o.indentDots==indentDots && o.scrollbar==scrollbar;
   @override int get hashCode => Object.hash(colorScheme,fontFamily,fontSize,
-    lineHeight,letterSpacing,cursorWidth,blockLines,bracketPair,indentDots,scrollbar);
+    lineHeight,letterSpacing,cursorWidth,blockLines,bracketPair,bracketColorization,
+    indentDots,scrollbar);
 }

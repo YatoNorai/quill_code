@@ -26,6 +26,9 @@ class EditorProps {
   bool showScrollbars     = true;
   bool showColorDecorators = true;
   bool showLightbulb  = true;
+  bool showBreadcrumbs = true;
+
+  bool showStatusBar = true;
 
   bool readOnly = false;
 

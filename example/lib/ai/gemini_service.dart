@@ -19,7 +19,7 @@ class GeminiService {
 
   GeminiService({
     required this.apiKey,
-    this.model       = 'gemini-2.0-flash',
+    this.model       = 'gemini-2.5-flash',
     this.maxTokens   = 256,
     this.temperature = 0.2,
     this.systemPrompt = _kDefault,

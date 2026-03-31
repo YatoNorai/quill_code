@@ -37,6 +37,7 @@ import '../theme/color_scheme.dart';
 import '../highlighting/span.dart';
 import '../highlighting/code_block.dart';
 import '../diagnostics/diagnostic_region.dart';
+import 'breadcrumbs_widget.dart';
 import 'completion_popup.dart';
 import 'search_bar_widget.dart';
 import 'symbol_input_bar.dart';
@@ -44,6 +45,7 @@ import 'minimap_widget.dart';
 import '../actions/code_action.dart';
 import '../language/dart_formatter.dart';
 import 'actions_menu_widget.dart';
+import 'status_bar_widget.dart';
 import '../actions/code_action_provider.dart';
 import '../actions/lightbulb_widget.dart';
 import '../text/bracket_matcher.dart';
@@ -235,6 +237,10 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   double _lastTapLx = 0, _lastTapLy = 0;
   // Throttle flag: avoids calling setState for every zoom PointerMoveEvent.
   bool _gwSetStatePending = false;
+
+  // ── Rename overlay (F2) ───────────────────────────────────────────────
+  bool _renameVisible = false;
+  String _renameInitialValue = '';
 
   // ── Fold cache ────────────────────────────────────────────────────────
   List<int>?   _cachedVis;
@@ -981,6 +987,19 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     });
   }
 
+  /// Show inline rename input at the cursor position (F2 / rename symbol).
+  /// Does nothing if LSP is not attached or cursor is not on a word.
+  void _showRenameOverlay() {
+    final ctrl = widget.controller;
+    if (!ctrl.hasLsp) return;
+    final word = ctrl.wordAtCursor;
+    if (word.isEmpty) return;
+    setState(() {
+      _renameInitialValue = word;
+      _renameVisible = true;
+    });
+  }
+
   Future<void> _onActionSelected(CodeAction action) async {
     if (!mounted) return;
     final ctrl = widget.controller;
@@ -1220,9 +1239,10 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
       }
     }
 
-    // Dismiss LSP hover and signature panels on any tap
+    // Dismiss LSP hover, signature, and rename panels on any tap
     if (_lspHoverVisible) setState(() => _lspHoverVisible = false);
     if (_lspSigVisible) setState(() => _lspSigVisible = false);
+    if (_renameVisible) setState(() => _renameVisible = false);
     ctrl.setCursor(pos);
     // On empty line: don't select word, just show toolbar at cursor
     final lineText = ctrl.content.getLineText(pos.line);
@@ -1439,6 +1459,12 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
       }
     }
 
+    // ── F2: Rename symbol ─────────────────────────────────────────────
+    if (key == LogicalKeyboardKey.f2) {
+      _showRenameOverlay();
+      return KeyEventResult.handled;
+    }
+
     // ── Completion navigation ──────────────────────────────────────────
     if (ctrl.isCompletionVisible) {
       if (key == LogicalKeyboardKey.arrowUp) {
@@ -1491,6 +1517,8 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
         }
         if (isShift) _unindentLine(); else ctrl.insertTab(); _bump(); return KeyEventResult.handled;
       case LogicalKeyboardKey.escape:
+        // Dismiss rename overlay first
+        if (_renameVisible) { setState(() => _renameVisible = false); return KeyEventResult.handled; }
         // Dismiss ghost text first (VSCode: Escape dismisses it before other actions)
         if (ctrl.ghostText.isVisible) { ctrl.ghostText.dismiss(); _bump(); return KeyEventResult.handled; }
         // Dismiss completion / search / selection
@@ -1720,6 +1748,23 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
             color: Colors.transparent,
             child: QuillSearchBar(controller: ctrl, theme: theme,
                 onClose: () => setState(() => _searchVisible = false)),
+          ),
+        if (ctrl.props.showBreadcrumbs)
+          BreadcrumbsWidget(
+            controller: ctrl,
+            theme: _overlayTheme,
+            onSymbolTap: (sym) {
+              ctrl.setCursor(sym.selectionRange.start);
+              // Scroll the editor to the target line.
+              final targetLine = sym.selectionRange.start.line;
+              final lineH = _effectiveTheme.lineHeightPx;
+              final targetY = targetLine * lineH;
+              _vCtrl.animateTo(
+                targetY,
+                duration: const Duration(milliseconds: 200),
+                curve: Curves.easeInOut,
+              );
+            },
           ),
         Expanded(child: LayoutBuilder(builder: (ctx, bc) {
           // bc.maxHeight already excludes keyboard because Scaffold's
@@ -1989,6 +2034,10 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
                 if (_colorPickerAnchor != null && _colorPickerMatch != null)
                   _buildColorPickerLayer(),
 
+                // ── Layer 15: Rename overlay (F2) ─────────────────────
+                if (!ctrl.props.readOnly && _renameVisible)
+                  _buildRenameOverlay(ctrl, theme, bc.maxHeight),
+
               ])         // Stack children
             ),           // ClipRect
           );             // GestureDetector (return)
@@ -1999,6 +2048,11 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
           controller: ctrl,
           theme: widget.theme ?? QuillThemeDark.build(),
         ),
+        if (ctrl.props.showStatusBar)
+          StatusBarWidget(
+            controller: ctrl,
+            theme: _overlayTheme,
+          ),
       ]),
     );
   }
@@ -2757,6 +2811,154 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
                       fontSize: theme.fontSize * 0.82),
                   overflow: TextOverflow.ellipsis, maxLines: 6)),
               ]),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Rename overlay (F2 — inline symbol rename) ─────────────────────────
+  Widget _buildRenameOverlay(
+      QuillCodeController ctrl, EditorTheme theme, double viewportH) {
+    final cs  = theme.colorScheme;
+    final pos = ctrl.cursor.position;
+    final lp  = _charToLocal(pos);
+
+    // Position just below the cursor line, aligned at the cursor column.
+    const ovW  = 220.0;
+    const ovH  = 40.0;
+    const pad  = 4.0;
+    final minimapW = ctrl.props.showMinimap ? _minimapWidth + pad : 0.0;
+    final cursorBottom = lp.dy;
+    final cursorTop    = lp.dy - _lh;
+    final spaceBelow   = viewportH - cursorBottom - pad;
+    final double top;
+    if (spaceBelow >= ovH) {
+      top = cursorBottom + pad;
+    } else {
+      top = (cursorTop - ovH - pad).clamp(0.0, double.maxFinite);
+    }
+    final left = lp.dx.clamp(pad, (_vpSize.width - ovW - minimapW - pad).clamp(pad, double.maxFinite)).toDouble();
+
+    return Positioned(
+      left: left, top: top, width: ovW, height: ovH,
+      child: _RenameInputField(
+        initialValue: _renameInitialValue,
+        theme: theme,
+        cs: cs,
+        onSubmit: (newName) {
+          setState(() => _renameVisible = false);
+          if (newName.isEmpty || newName == _renameInitialValue) return;
+          final renamePos = ctrl.cursor.position;
+          ctrl.lspRenameAt(renamePos, newName).then((edits) {
+            if (!mounted || edits == null || edits.isEmpty) return;
+            ctrl.applyRenameEdits(edits).then((_) {
+              if (!mounted) return;
+              _bump();
+            });
+          });
+        },
+        onCancel: () => setState(() => _renameVisible = false),
+      ),
+    );
+  }
+}
+
+// ── Rename input field widget ──────────────────────────────────────────────
+class _RenameInputField extends StatefulWidget {
+  final String initialValue;
+  final EditorTheme theme;
+  final EditorColorScheme cs;
+  final ValueChanged<String> onSubmit;
+  final VoidCallback onCancel;
+
+  const _RenameInputField({
+    required this.initialValue,
+    required this.theme,
+    required this.cs,
+    required this.onSubmit,
+    required this.onCancel,
+  });
+
+  @override
+  State<_RenameInputField> createState() => _RenameInputFieldState();
+}
+
+class _RenameInputFieldState extends State<_RenameInputField> {
+  late final TextEditingController _textCtrl;
+  late final FocusNode _focusNode;
+
+  @override
+  void initState() {
+    super.initState();
+    _textCtrl = TextEditingController(text: widget.initialValue)
+      ..selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: widget.initialValue.length,
+      );
+    _focusNode = FocusNode();
+    // Auto-focus the text field so the user can type immediately
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focusNode.requestFocus();
+    });
+  }
+
+  @override
+  void dispose() {
+    _textCtrl.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  KeyEventResult _handleKey(FocusNode _, KeyEvent ev) {
+    if (ev is! KeyDownEvent) return KeyEventResult.ignored;
+    if (ev.logicalKey == LogicalKeyboardKey.escape) {
+      widget.onCancel();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs    = widget.cs;
+    final theme = widget.theme;
+    return Focus(
+      onKeyEvent: _handleKey,
+      child: Material(
+        elevation: 8,
+        borderRadius: BorderRadius.circular(5),
+        color: cs.completionBackground,
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(5),
+            border: Border.all(color: cs.completionBackground.withOpacity(0.6), width: 1.5),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          child: Row(
+            children: [
+              const Icon(Icons.edit, size: 13, color: Colors.grey),
+              const SizedBox(width: 6),
+              Expanded(
+                child: TextField(
+                  controller: _textCtrl,
+                  focusNode: _focusNode,
+                  style: TextStyle(
+                    color: cs.textNormal,
+                    fontSize: theme.fontSize,
+                    fontFamily: theme.fontFamily,
+                    height: 1.2,
+                  ),
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    border: InputBorder.none,
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                  onSubmitted: (v) => widget.onSubmit(v.trim()),
+                  onEditingComplete: () {},
+                ),
+              ),
             ],
           ),
         ),

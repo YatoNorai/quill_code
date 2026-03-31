@@ -134,7 +134,7 @@ class AiSettings {
 
   const AiSettings({
     this.geminiApiKey = '',
-    this.geminiModel = 'gemini-2.0-flash',
+    this.geminiModel = 'gemini-2.5-flash',
     this.systemPrompt = kDefaultSystem,
     this.agentMode = AgentMode.fullAgent,
     this.ghostTextEnabled = true,

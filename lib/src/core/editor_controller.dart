@@ -536,6 +536,27 @@ class QuillCodeController extends ChangeNotifier {
   Future<List<LspDocumentSymbol>> lspDocumentSymbols() =>
       _lspBinding?.documentSymbols() ?? Future.value([]);
 
+  /// Returns the chain of symbols containing the cursor, from outermost to
+  /// innermost. E.g. [MyClass, build, _someVar].
+  /// Returns an empty list when LSP is unavailable or the cursor is outside
+  /// every symbol range.
+  Future<List<LspDocumentSymbol>> getBreadcrumbPath() async {
+    final symbols = await lspDocumentSymbols();
+    final pos = cursor.position;
+
+    List<LspDocumentSymbol> _findPath(List<LspDocumentSymbol> syms) {
+      for (final sym in syms) {
+        if (sym.range.contains(pos)) {
+          final childPath = _findPath(sym.children);
+          return [sym, ...childPath];
+        }
+      }
+      return [];
+    }
+
+    return _findPath(symbols);
+  }
+
   /// Get LSP document highlight (all occurrences of symbol under cursor).
   Future<List<EditorRange>> lspDocumentHighlightAt(CharPosition pos) =>
       _lspBinding?.documentHighlightAt(pos) ?? Future.value([]);
@@ -551,6 +572,50 @@ class QuillCodeController extends ChangeNotifier {
   /// Apply LSP rename — returns map of uri → edits (caller applies them).
   Future<Map<String, List<LspTextEdit>>?> lspRenameAt(CharPosition pos, String newName) =>
       _lspBinding?.renameAt(pos, newName) ?? Future.value(null);
+
+  /// Apply workspace rename edits returned by [lspRenameAt].
+  /// Only applies edits for the current file URI — cross-file edits are logged
+  /// and skipped (multi-file rename requires external file handling).
+  Future<void> applyRenameEdits(Map<String, List<LspTextEdit>> edits) async {
+    final uri = _lspBinding?.uri;
+    if (uri == null) return;
+    final fileEdits = edits[uri];
+    if (fileEdits == null || fileEdits.isEmpty) return;
+
+    // Sort in reverse document order so earlier edits don't shift later positions.
+    final sorted = List<LspTextEdit>.from(fileEdits)
+      ..sort((a, b) {
+        final lineCmp = b.range.start.line.compareTo(a.range.start.line);
+        if (lineCmp != 0) return lineCmp;
+        return b.range.start.column.compareTo(a.range.start.column);
+      });
+
+    _content.beginBatchEdit();
+    for (final edit in sorted) {
+      _content.replace(edit.range, edit.newText);
+    }
+    _content.endBatchEdit();
+    _bumpContent();
+    notifyListeners();
+  }
+
+  /// Returns the word text at the current cursor position.
+  /// Used to pre-fill the rename input.
+  String get wordAtCursor {
+    final pos  = cursor.position;
+    final line = _content.getLineText(pos.line);
+    int start = pos.column;
+    while (start > 0 && _isWordChar(line.codeUnitAt(start - 1))) start--;
+    int end = pos.column;
+    while (end < line.length && _isWordChar(line.codeUnitAt(end))) end++;
+    return line.substring(start, end);
+  }
+
+  static bool _isWordChar(int c) =>
+      (c >= 65 && c <= 90) ||  // A-Z
+      (c >= 97 && c <= 122) || // a-z
+      (c >= 48 && c <= 57) ||  // 0-9
+      c == 95;                  // _
 
   void setDiagnostics(List<DiagnosticRegion> regions) {
     _diagnostics.setDiagnostics(regions);
