@@ -20,14 +20,27 @@ class LspSocketClient implements LspClient {
   int  _nextId = 1;
   bool _ready  = false;
 
+  /// Called when the socket errors or messages fail to parse.
+  void Function(String message)? onError;
+
   LspSocketClient({required this.serverUrl, required this.workspacePath, required this.languageId});
 
   Future<void> connect() async {
     _ws = await WebSocket.connect(serverUrl);
     _ws!.listen(
-      (data) { try { _onMsg(jsonDecode(data as String) as Map<String, dynamic>); } catch (e) { debugPrint('[LSP] $e'); } },
-      onError: (e) { debugPrint('[LSP socket] error: $e'); _cleanup(); },
-      onDone:  ()  { debugPrint('[LSP socket] closed'); _cleanup(); },
+      (data) {
+        try { _onMsg(jsonDecode(data as String) as Map<String, dynamic>); }
+        catch (e) {
+          debugPrint('[LSP] $e');
+          onError?.call('LSP message parse error: $e');
+        }
+      },
+      onError: (e) {
+        debugPrint('[LSP socket] error: $e');
+        onError?.call('LSP socket error: $e');
+        _cleanup();
+      },
+      onDone:  () { debugPrint('[LSP socket] closed'); _cleanup(); },
     );
     await _initialize();
   }

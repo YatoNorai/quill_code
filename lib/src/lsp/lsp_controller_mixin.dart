@@ -24,6 +24,9 @@ class LspBinding {
   late void Function(List<CompletionItem> items) onCompletionItems;
   late void Function(List<DiagnosticRegion> diags) onDiagnostics;
   late void Function() onNotify;
+  /// Called when the LSP server reports an error or crashes. The string
+  /// contains a human-readable description. Wire this up to show a toast/banner.
+  void Function(String message)? onError;
 
   Timer?  _diagTimer;
   bool    _opened = false;
@@ -87,6 +90,7 @@ class LspBinding {
   /// Returns a new CompletionItem with isResolved=true, or null on failure.
   Future<CompletionItem?> resolveCompletionItem(CompletionItem item) async {
     if (!_opened || item.rawLspData == null) return null;
+    if (item.rawLspData is! LspCompletionResult) return null;
     try {
       final raw = item.rawLspData as LspCompletionResult;
       final resolved = await client.resolveCompletion(raw);

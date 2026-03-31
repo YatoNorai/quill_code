@@ -77,7 +77,10 @@ class QuillCodeController extends ChangeNotifier {
 
   final DiagnosticsContainer _diagnostics = DiagnosticsContainer();
   LspBinding?            _lspBinding;    // optional LSP client
-  StreamSubscription<dynamic>? _lspDiagSub; // publishDiagnostics stream sub
+  StreamSubscription<List<LspDiagnostic>>? _lspDiagSub; // publishDiagnostics stream sub
+  /// Called when the LSP process crashes or reports errors. Wire this to show
+  /// a toast/snackbar so the user knows why completions/diagnostics stopped.
+  void Function(String message)? onLspError;
   List<CompletionItem>       _completionItems = [];
   bool                       _completionVisible = false;
   bool                       _completionLoading = false; // true while LSP request in-flight
@@ -471,6 +474,7 @@ class QuillCodeController extends ChangeNotifier {
       }
     };
     _lspBinding!.onNotify = notifyListeners;
+    _lspBinding!.onError  = onLspError;
     await _lspBinding!.open(text);
     // If the client is a LspStdioClient, subscribe to pushed diagnostics.
     // This handles textDocument/publishDiagnostics server notifications
@@ -483,13 +487,12 @@ class QuillCodeController extends ChangeNotifier {
         source: d.source, code: d.code,
       )).toList());
     }
-    final rawClient = client;
-    if (rawClient is LspStdioClient) {
-      _lspDiagSub = rawClient.listenDiagnostics(uri, onDiags)
-          as StreamSubscription<dynamic>;
-    } else if (rawClient is LspSocketClient) {
-      _lspDiagSub = rawClient.listenDiagnostics(uri, onDiags)
-          as StreamSubscription<dynamic>;
+    if (client is LspStdioClient) {
+      client.onError = onLspError;
+      _lspDiagSub = client.listenDiagnostics(uri, onDiags);
+    } else if (client is LspSocketClient) {
+      client.onError = onLspError;
+      _lspDiagSub = client.listenDiagnostics(uri, onDiags);
     }
   }
 
@@ -499,6 +502,11 @@ class QuillCodeController extends ChangeNotifier {
     await _lspBinding?.close();
     _lspBinding = null;
   }
+
+  /// Whether there is an undo operation available.
+  bool get canUndo => _content.canUndo;
+  /// Whether there is a redo operation available.
+  bool get canRedo => _content.canRedo;
 
   /// Whether an LSP client is currently attached.
   bool get hasLsp => _lspBinding != null;

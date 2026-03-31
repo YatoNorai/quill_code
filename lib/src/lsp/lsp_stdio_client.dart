@@ -37,6 +37,9 @@ class LspStdioClient implements LspClient {
   bool _ready     = false;
   Future<void> _writeQueue = Future.value();
 
+  /// Called when the process crashes, writes fail, or messages fail to parse.
+  void Function(String message)? onError;
+
   LspStdioClient._({
     required this.executable,
     required this.args,
@@ -70,11 +73,16 @@ class LspStdioClient implements LspClient {
     _process = await Process.start(executable, args, environment: environment);
     _process.stdout.listen(_onData);
     _process.stderr.listen(
-      (d) => debugPrint('[LSP stderr] ${utf8.decode(d)}'),
+      (d) {
+        final msg = utf8.decode(d);
+        debugPrint('[LSP stderr] $msg');
+        onError?.call('LSP stderr: $msg');
+      },
       onError: (_) {},
     );
     _process.exitCode.then((code) {
       debugPrint('[LSP] process exited with code $code');
+      if (code != 0) onError?.call('LSP process exited with code $code');
       _cleanup();   // release pending completers + stream on unexpected exit
     });
     await _initialize();
@@ -99,6 +107,7 @@ class LspStdioClient implements LspClient {
         _onMessage(jsonDecode(utf8.decode(body)) as Map<String, dynamic>);
       } catch (e) {
         debugPrint('[LSP] parse error: $e');
+        onError?.call('LSP message parse error: $e');
       }
     }
   }
@@ -154,7 +163,10 @@ class LspStdioClient implements LspClient {
       final header = utf8.encode('Content-Length: ${body.length}\r\n\r\n');
       _process.stdin.add([...header, ...body]);
       await _process.stdin.flush();
-    }).catchError((e) => debugPrint('[LSP] write error: $e'));
+    }).catchError((e) {
+      debugPrint('[LSP] write error: $e');
+      onError?.call('LSP write error: $e');
+    });
   }
 
   // ── Initialize ────────────────────────────────────────────────────────────

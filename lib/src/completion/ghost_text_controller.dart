@@ -110,11 +110,16 @@ class GhostTextController {
     ), seq));
   }
 
+  static const _kProviderTimeout = Duration(seconds: 8);
+
   Future<void> _fetch(GhostTextContext ctx, int seq) async {
     if (_provider == null || _destroyed) return;
     List<String> results;
-    try { results = await _provider!(ctx); }
-    catch (_) { results = const []; }
+    try {
+      results = await _provider!(ctx).timeout(_kProviderTimeout);
+    } catch (_) {
+      results = const [];
+    }
     // Discard stale response — a newer edit/request fired while we were waiting.
     if (_destroyed || seq != _reqSeq) return;
 

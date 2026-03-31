@@ -16,6 +16,7 @@ class EditorSearcher {
   int _currentResultIndex = -1;
   bool _cyclicJumping = true;
   Timer? _debounce;
+  String? _patternError; // non-null when last pattern was an invalid regex
 
   final StreamController<List<EditorRange>> _resultsController =
       StreamController.broadcast();
@@ -23,6 +24,8 @@ class EditorSearcher {
   Stream<List<EditorRange>> get resultsStream => _resultsController.stream;
   List<EditorRange> get results => List.unmodifiable(_results);
   bool get hasQuery => _currentPattern != null && _currentPattern!.isNotEmpty;
+  /// Non-null when the current search pattern is an invalid regular expression.
+  String? get patternError => _patternError;
   bool get cyclicJumping => _cyclicJumping;
   set cyclicJumping(bool v) => _cyclicJumping = v;
   int get currentResultIndex => _currentResultIndex;
@@ -39,6 +42,7 @@ class EditorSearcher {
 
   void stopSearch() {
     _currentPattern = null;
+    _patternError = null;
     _results = [];
     _currentResultIndex = -1;
     if (!_resultsController.isClosed) _resultsController.add([]);
@@ -79,6 +83,7 @@ class EditorSearcher {
 
   List<EditorRange> _findAll(String text, String pattern, SearchOptions opts) {
     final results = <EditorRange>[];
+    _patternError = null; // clear previous error before attempting
     try {
       RegExp regex;
       if (opts.type == SearchType.regularExpression) {
@@ -111,7 +116,15 @@ class EditorSearcher {
       for (final m in matches) {
         results.add(EditorRange(_offsetToPos(m.start), _offsetToPos(m.end)));
       }
-    } catch (_) {}
+    } on FormatException catch (e) {
+      // Invalid regex pattern — surface the error so the UI can show it.
+      _patternError = e.message;
+      return results;
+    } catch (e) {
+      _patternError = e.toString();
+      return results;
+    }
+    _patternError = null;
     return results;
   }
 
