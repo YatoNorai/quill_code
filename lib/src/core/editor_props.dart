@@ -17,6 +17,7 @@ class EditorProps {
   bool wordWrap = false;
   bool showDiagnosticIndicators = true;
   bool showInlayHints = true;
+  bool showCodeLens = true;
 
   bool stickyScroll = false;
   int stickyScrollMaxLines = 3;

@@ -119,6 +119,23 @@ class LspDocumentSymbol {
   });
 }
 
+/// A code lens item — an actionable annotation shown above a function/class.
+class LspCodeLens {
+  final EditorRange range;           // The line this lens belongs to
+  final String? title;               // Display text (e.g. "3 references")
+  final String? command;             // LSP command identifier
+  final List<dynamic>? commandArgs;
+  final Map<String, dynamic>? data;  // For resolve request
+
+  const LspCodeLens({
+    required this.range,
+    this.title,
+    this.command,
+    this.commandArgs,
+    this.data,
+  });
+}
+
 /// An inlay hint (inline annotation, e.g. parameter name or inferred type).
 class LspInlayHint {
   final CharPosition position;
@@ -233,6 +250,14 @@ abstract class LspClient {
   /// This is the `completionItem/resolve` LSP request (Monaco pattern).
   Future<LspCompletionResult?> resolveCompletion(LspCompletionResult item);
 
+  /// Code lens items for the document — small actionable annotations shown
+  /// above functions/classes (e.g. "3 references | Run | Debug").
+  Future<List<LspCodeLens>> codeLens({required String uri});
+
+  /// Resolve a single code lens item to fill in its command/title.
+  /// Returns null if the server doesn't support it or the request fails.
+  Future<LspCodeLens?> resolveCodeLens(LspCodeLens item);
+
   /// Shutdown the server.
   Future<void> shutdown();
 }
@@ -266,6 +291,8 @@ class NullLspClient implements LspClient {
   @override Future<List<EditorRange>> documentHighlight({required uri, required position}) async => [];
   @override Future<List<LspInlayHint>> inlayHints({required uri, required range}) async => [];
   @override Future<LspCompletionResult?> resolveCompletion(LspCompletionResult item) async => null;
+  @override Future<List<LspCodeLens>> codeLens({required uri}) async => [];
+  @override Future<LspCodeLens?> resolveCodeLens(LspCodeLens item) async => null;
   @override Future<void> shutdown() async {}
 }
 

@@ -39,6 +39,7 @@ import '../highlighting/code_block.dart';
 import '../diagnostics/diagnostic_region.dart';
 import 'breadcrumbs_widget.dart';
 import 'completion_popup.dart';
+import 'goto_line_widget.dart';
 import 'search_bar_widget.dart';
 import 'symbol_input_bar.dart';
 import 'minimap_widget.dart';
@@ -57,7 +58,9 @@ import '../lsp/lsp_bridge.dart';
 import '../lsp/lsp_controller_mixin.dart';
 import '../lsp/lsp_hover_panel.dart';
 import '../lsp/lsp_signature_panel.dart';
+import 'peek_panel_widget.dart';
 import '../lsp/quill_lsp_config.dart';
+import 'code_lens_widget.dart';
 import '../lsp/lsp_stdio_client.dart';
 import '../native/quill_native.dart';
 import '../lsp/lsp_socket_client.dart';
@@ -192,6 +195,9 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   // Signature help — shown when user types '(' or ','
   LspSignatureHelp?           _lspSigHelp;
   bool                        _lspSigVisible = false;
+  // Peek Definition — inline read-only snippet panel (Alt+F12 / long-press)
+  LspLocation?                _peekLocation;
+  bool                        _peekVisible = false;
   BracketPair?                _activeBracketPair; // bracket pair under/adjacent to cursor
   int                         _activeBlockDepth = 0; // nesting depth of cursor's codeblock
   bool                        _symbolPanelVisible = false;
@@ -238,9 +244,20 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   // Throttle flag: avoids calling setState for every zoom PointerMoveEvent.
   bool _gwSetStatePending = false;
 
+  // ── Code lens debounce ────────────────────────────────────────────────
+  Timer? _codeLensDebounce;
+
   // ── Rename overlay (F2) ───────────────────────────────────────────────
   bool _renameVisible = false;
   String _renameInitialValue = '';
+
+  // ── Go-to-line overlay (Ctrl+G) ───────────────────────────────────────
+  bool _gotoLineVisible = false;
+
+  // ── Text drag-and-drop ────────────────────────────────────────────────
+  bool          _isDragging      = false;
+  EditorRange?  _dragSourceRange;
+  CharPosition? _dragTarget;
 
   // ── Fold cache ────────────────────────────────────────────────────────
   List<int>?   _cachedVis;
@@ -510,13 +527,12 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     _edgeTimer?.cancel();
     _scrollEndTimer?.cancel();
     _scrollbarHideTimer?.cancel();
+    _codeLensDebounce?.cancel();
     _inputConn?.close();
     _inputConn = null;
 
     // ── Step 3: stop & dispose animation/notifiers ──
     _blink.stop();
-    _blink.clearListeners();
-    _blink.clearStatusListeners();
     _blink.dispose();
     _scrollbarFade.dispose();
     _cursorTick.dispose();
@@ -737,11 +753,20 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
       _lastContentVersion = newVer;
       widget.onChanged?.call(ctrl.text);
       if (_lspHoverVisible) setState(() => _lspHoverVisible = false);
+      if (_peekVisible) setState(() => _peekVisible = false);
       // Dismiss signature help when content changes via non-trigger edits
       // (e.g. backspace after `(` — the ) handler below covers the `)` case)
       // Recalculate bracket pair + block depth so deleting '}' immediately
       // clears the pair highlight without waiting for the next cursor move.
       _updateLightbulbAndSymbol();
+      // Debounce code lens refresh: fetch 2 s after the last edit so we
+      // don't hammer the LSP server on every keystroke.
+      if (ctrl.hasLsp && ctrl.props.showCodeLens) {
+        _codeLensDebounce?.cancel();
+        _codeLensDebounce = Timer(const Duration(seconds: 2), () {
+          if (mounted) ctrl.refreshCodeLens();
+        });
+      }
     }
     _ensureCursorVisible();
   }
@@ -968,6 +993,19 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     });
   }
 
+  /// Show the inline Peek Definition panel at the cursor position.
+  /// Only fires if an LSP client is attached. Dismissed on Escape / tap.
+  Future<void> _showPeekPanel() async {
+    final ctrl = widget.controller;
+    if (!ctrl.hasLsp) return;
+    final defs = await ctrl.lspDefinitionAt(ctrl.cursor.position);
+    if (!mounted || defs.isEmpty) return;
+    setState(() {
+      _peekLocation = defs.first;
+      _peekVisible  = true;
+    });
+  }
+
   /// Fetch and show LSP signature help at the cursor position.
   /// Called automatically when user types `(` or `,`.
   void _triggerSignatureHelp({String? triggerChar}) {
@@ -985,6 +1023,28 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
         _lspSigVisible = true;
       });
     });
+  }
+
+  /// Format the document via LSP (Shift+Alt+F). Applies edits in reverse order
+  /// so earlier positions are not shifted by later edits.
+  Future<void> _doFormat() async {
+    final ctrl = widget.controller;
+    if (!ctrl.hasLsp) return;
+    final edits = await ctrl.lspFormat();
+    if (!mounted || edits.isEmpty) return;
+    final sorted = List.of(edits)
+      ..sort((a, b) {
+        final lc = b.range.start.line.compareTo(a.range.start.line);
+        if (lc != 0) return lc;
+        return b.range.start.column.compareTo(a.range.start.column);
+      });
+    ctrl.content.beginBatchEdit();
+    for (final e in sorted) {
+      ctrl.content.replace(e.range, e.newText);
+    }
+    ctrl.content.endBatchEdit();
+    ctrl.notifyListeners();
+    _bump();
   }
 
   /// Show inline rename input at the cursor position (F2 / rename symbol).
@@ -1118,6 +1178,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
 
     widget.controller.hideCompletion();
     _toolbarVisible.value = false;
+    if (_peekVisible) setState(() => _peekVisible = false);
 
     // Tap always dismisses ghost text (accept = Tab/Enter, cancel = tap elsewhere).
     if (widget.controller.ghostText.isVisible) {
@@ -1227,22 +1288,27 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     _showKbd();
     final pos = _localToChar(d.localPosition);
 
-    // ── If user presses on already-selected text: show toolbar, don't clear ──
+    // ── If user presses on already-selected text: enter drag mode ─────────
     final ctrl = widget.controller;
     if (ctrl.cursor.hasSelection) {
       final sel = ctrl.cursor.selection;
-      // Check if the long-press landed inside the existing selection
       if (_positionIsInsideSelection(pos, sel)) {
         HapticFeedback.selectionClick();
-        _showSelHandles();
+        // Enter drag-and-drop mode — remember the source range
+        _isDragging      = true;
+        _dragSourceRange = sel;
+        _dragTarget      = pos;
+        
+        _cursorTick.value++;
         return;
       }
     }
 
-    // Dismiss LSP hover, signature, and rename panels on any tap
+    // Dismiss LSP hover, signature, rename, and peek panels on any tap
     if (_lspHoverVisible) setState(() => _lspHoverVisible = false);
     if (_lspSigVisible) setState(() => _lspSigVisible = false);
     if (_renameVisible) setState(() => _renameVisible = false);
+    if (_peekVisible) setState(() => _peekVisible = false);
     ctrl.setCursor(pos);
     // On empty line: don't select word, just show toolbar at cursor
     final lineText = ctrl.content.getLineText(pos.line);
@@ -1269,15 +1335,90 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
 
   void _onLongPressMoveUpdate(LongPressMoveUpdateDetails d) {
     if (d.localPosition.dx < _gw) return;
+    if (_isDragging) {
+      _dragTarget      = _localToChar(d.localPosition);
+      
+      _edgeScroll(d.localPosition);
+      _cursorTick.value++;
+      return;
+    }
     widget.controller.setCursor(_localToChar(d.localPosition), select: true);
     _edgeScroll(d.localPosition); _cursorTick.value++;
   }
 
   void _onLongPressEnd(LongPressEndDetails _) {
     _edgeTimer?.cancel();
+    if (_isDragging) {
+      _performTextDrop();
+      return;
+    }
     if (widget.controller.cursor.hasSelection) _showSelHandles();
     _updateLightbulbAndSymbol();
     _fetchLspHover();
+  }
+
+  /// Move selected text to a new position (drag-and-drop).
+  void _performTextDrop() {
+    _isDragging = false;
+    final src = _dragSourceRange;
+    var tgt = _dragTarget;
+    _dragSourceRange = null;
+    _dragTarget      = null;
+    
+
+    final ctrl = widget.controller;
+    if (src == null || tgt == null) {
+      if (ctrl.cursor.hasSelection) _showSelHandles();
+      return;
+    }
+    if (_positionIsInsideSelection(tgt, src)) {
+      ctrl.cursor.setRange(src);
+      _cursorTick.value++;
+      _showSelHandles();
+      return;
+    }
+
+    final movedText = ctrl.content.getTextInRange(src);
+    final dropBefore = tgt < src.start;
+
+    ctrl.content.beginBatchEdit();
+    if (dropBefore) {
+      ctrl.content.insert(tgt, movedText);
+      final ml = movedText.split('\n');
+      final EditorRange adjSrc;
+      if (ml.length == 1 && tgt.line == src.start.line) {
+        adjSrc = EditorRange(
+          CharPosition(src.start.line, src.start.column + movedText.length),
+          CharPosition(src.end.line,   src.end.column   + movedText.length),
+        );
+      } else {
+        adjSrc = src;
+      }
+      ctrl.content.delete(adjSrc);
+    } else {
+      ctrl.content.delete(src);
+      final CharPosition adjTgt;
+      if (src.start.line == src.end.line && tgt.line == src.start.line) {
+        adjTgt = CharPosition(tgt.line, math.max(0, tgt.column - (src.end.column - src.start.column)));
+      } else if (tgt.line > src.end.line) {
+        adjTgt = CharPosition(tgt.line - (src.end.line - src.start.line), tgt.column);
+      } else {
+        adjTgt = tgt;
+      }
+      ctrl.content.insert(adjTgt, movedText);
+      tgt = adjTgt;
+    }
+    ctrl.content.endBatchEdit();
+
+    final dl = movedText.split('\n');
+    final newEnd = dl.length == 1
+        ? CharPosition(tgt.line, tgt.column + movedText.length)
+        : CharPosition(tgt.line + dl.length - 1, dl.last.length);
+    ctrl.cursor.setRange(EditorRange(tgt, newEnd));
+    ctrl.notifyListeners();
+    _cursorTick.value++;
+    _showSelHandles();
+    _updateLightbulbAndSymbol();
   }
 
   // ── Handle drag — global→local conversion ─────────────────────────────
@@ -1375,7 +1516,11 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
         // ── Command Palette (Ctrl+Shift+P) ──────────────────────────
         case LogicalKeyboardKey.keyP:
           if (isShift) {
-            QuillActionsMenu.show(context, ctrl, widget.theme ?? QuillThemeDark.build());
+            QuillActionsMenu.show(
+              context, ctrl, widget.theme ?? QuillThemeDark.build(),
+              onGotoLine: () => setState(() => _gotoLineVisible = true),
+              onFormatDocument: _doFormat,
+            );
             return KeyEventResult.handled;
           }
           break;
@@ -1384,10 +1529,12 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
         case LogicalKeyboardKey.keyL:
           ctrl.selectLine(); _bump(); _showSelHandles(); return KeyEventResult.handled;
 
-        // ── VSCode: Duplicate line / selection down (Ctrl+D selects next occurrence
-        //    in VSCode; here we map it to select-line for usability on mobile) ──
+        // ── VSCode: Ctrl+D — add cursor at next occurrence (multi-cursor) ──
         case LogicalKeyboardKey.keyD:
-          ctrl.selectLine(); _bump(); return KeyEventResult.handled;
+          if (!isShift && !isAlt) {
+            ctrl.addCursorAtNextOccurrence(); _bump(); return KeyEventResult.handled;
+          }
+          break;
 
         // ── VSCode: Delete line (Ctrl+Shift+K) ─────────────────────
         case LogicalKeyboardKey.keyK:
@@ -1425,9 +1572,20 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
         case LogicalKeyboardKey.keyJ:
           _joinLines(); _bump(); return KeyEventResult.handled;
 
-        // ── VSCode: Go to line beginning (Ctrl+G placeholder — no dialog on mobile) ──
+        // ── Go to line (Ctrl+G) ─────────────────────────────────────────
         case LogicalKeyboardKey.keyG:
-          return KeyEventResult.handled; // swallow, could open go-to-line UI later
+          setState(() => _gotoLineVisible = !_gotoLineVisible);
+          return KeyEventResult.handled;
+
+        // ── Ctrl+Alt+↑ — add cursor above ───────────────────────────────
+        case LogicalKeyboardKey.arrowUp:
+          if (isAlt) { ctrl.addCursorAbove(); _bump(); return KeyEventResult.handled; }
+          break;
+
+        // ── Ctrl+Alt+↓ — add cursor below ───────────────────────────────
+        case LogicalKeyboardKey.arrowDown:
+          if (isAlt) { ctrl.addCursorBelow(); _bump(); return KeyEventResult.handled; }
+          break;
 
         default: break;
       }
@@ -1436,13 +1594,19 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     // ── Alt shortcuts (VSCode: move lines up/down) ─────────────────────
     if (isAlt && !isCtrl) {
       switch (key) {
-        // Alt+Up — move line(s) up
+        // Alt+Up — move line(s) up (or column select if Shift held)
         case LogicalKeyboardKey.arrowUp:
+          if (isShift) {
+            ctrl.extendColumnSelectionUp(); _bump(); return KeyEventResult.handled;
+          }
           if (ctrl.cursor.hasSelection) _moveLinesUp();
           else _moveCurrentLineUp();
           _bump(); return KeyEventResult.handled;
-        // Alt+Down — move line(s) down
+        // Alt+Down — move line(s) down (or column select if Shift held)
         case LogicalKeyboardKey.arrowDown:
+          if (isShift) {
+            ctrl.extendColumnSelectionDown(); _bump(); return KeyEventResult.handled;
+          }
           if (ctrl.cursor.hasSelection) _moveLinesDown();
           else _moveCurrentLineDown();
           _bump(); return KeyEventResult.handled;
@@ -1455,6 +1619,13 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
           ctrl.cursor.moveRight(select: isShift, byWord: true);
           ctrl.setCursor(ctrl.cursor.position, select: isShift);
           _bump(); return KeyEventResult.handled;
+        // Shift+Alt+F — Format document
+        case LogicalKeyboardKey.keyF:
+          if (isShift) { _doFormat(); return KeyEventResult.handled; }
+          break;
+        // Alt+F12 — Peek Definition (VSCode shortcut)
+        case LogicalKeyboardKey.f12:
+          _showPeekPanel(); return KeyEventResult.handled;
         default: break;
       }
     }
@@ -1517,12 +1688,17 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
         }
         if (isShift) _unindentLine(); else ctrl.insertTab(); _bump(); return KeyEventResult.handled;
       case LogicalKeyboardKey.escape:
+        // Dismiss peek definition panel first
+        if (_peekVisible) { setState(() => _peekVisible = false); return KeyEventResult.handled; }
         // Dismiss rename overlay first
+        if (_gotoLineVisible) { setState(() => _gotoLineVisible = false); return KeyEventResult.handled; }
         if (_renameVisible) { setState(() => _renameVisible = false); return KeyEventResult.handled; }
         // Dismiss ghost text first (VSCode: Escape dismisses it before other actions)
         if (ctrl.ghostText.isVisible) { ctrl.ghostText.dismiss(); _bump(); return KeyEventResult.handled; }
         // Dismiss completion / search / selection
         if (ctrl.isCompletionVisible) { ctrl.hideCompletion(); _bump(); return KeyEventResult.handled; }
+        // Collapse extra cursors (multi-cursor) — before clearing selection
+        if (ctrl.hasMultiCursor) { ctrl.clearExtraCursors(); _bump(); return KeyEventResult.handled; }
         if (_searchVisible) { setState(() => _searchVisible = false); return KeyEventResult.handled; }
         if (ctrl.cursor.hasSelection) { ctrl.cursor.clearSelection(); _hideAllHandles(); _bump(); return KeyEventResult.handled; }
         break;
@@ -1688,7 +1864,6 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
 
   // Android keyboards (Gboard, Samsung, etc.) often call deleteSurroundingText
   // instead of updateEditingValue when backspace is pressed.
-  @override
   void deleteSurroundingText(int beforeLength, int afterLength) {
     final ctrl = widget.controller;
     for (int i = 0; i < beforeLength; i++) ctrl.deleteCharBefore();
@@ -1696,7 +1871,6 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     if (beforeLength > 0 || afterLength > 0) { _bump(); _resetImeState(); }
   }
 
-  @override
   void deleteSurroundingTextInCodeUnits(int beforeLength, int afterLength) {
     deleteSurroundingText(beforeLength, afterLength);
   }
@@ -2027,16 +2201,58 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
                     },
                   ),
 
-                // ── Layer 13: Scrollbars ──────────────────────────────
+                // ── Layer 13: Peek Definition panel (Alt+F12) ────────
+                if (_peekVisible && _peekLocation != null)
+                  ValueListenableBuilder<int>(
+                    valueListenable: _cursorTick,
+                    builder: (_, __, ___) {
+                      final pos    = ctrl.cursor.position;
+                      final anchor = _charToLocal(pos);
+                      return PeekPanelWidget(
+                        theme:          _overlayTheme,
+                        location:       _peekLocation!,
+                        viewportWidth:  _vpSize.width,
+                        viewportHeight: bc.maxHeight,
+                        anchorLocal:    anchor,
+                        onDismiss: () => setState(() => _peekVisible = false),
+                        onNavigate: (loc) {
+                          setState(() => _peekVisible = false);
+                          ctrl.setCursor(loc.range.start);
+                          _bump();
+                        },
+                      );
+                    },
+                  ),
+
+                // ── Layer 14: Code lens ───────────────────────────────
+                if (ctrl.hasLsp && ctrl.props.showCodeLens && ctrl.codeLensItems.isNotEmpty)
+                  ListenableBuilder(
+                    listenable: widget.controller,
+                    builder: (_, __) => CodeLensWidget(
+                      controller: ctrl,
+                      theme: _overlayTheme,
+                      gutterWidth: _gw,
+                      scrollY: _vCtrl.hasClients ? _vCtrl.offset : 0.0,
+                      lineHeight: _lh,
+                      viewportHeight: bc.maxHeight,
+                      onTap: _handleCodeLensTap,
+                    ),
+                  ),
+
+                // ── Layer 15: Scrollbars ──────────────────────────────
                 if (ctrl.props.showScrollbars) _buildScrollbars(cs),
 
-                // ── Layer 14: Color picker ────────────────────────────
+                // ── Layer 16: Color picker ────────────────────────────
                 if (_colorPickerAnchor != null && _colorPickerMatch != null)
                   _buildColorPickerLayer(),
 
-                // ── Layer 15: Rename overlay (F2) ─────────────────────
+                // ── Layer 17: Rename overlay (F2) ─────────────────────
                 if (!ctrl.props.readOnly && _renameVisible)
                   _buildRenameOverlay(ctrl, theme, bc.maxHeight),
+
+                // ── Layer 18: Go-to-line overlay (Ctrl+G) ─────────────
+                if (_gotoLineVisible)
+                  _buildGotoLineOverlay(ctrl, theme),
 
               ])         // Stack children
             ),           // ClipRect
@@ -2413,6 +2629,13 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
             [
               if (!hidden.contains('Desfazer')) _ToolItem('Desfazer',  Icons.undo,  () { ctrl.undo(); _bump(); }),
               if (!hidden.contains('Refazer'))  _ToolItem('Refazer',   Icons.redo,  () { ctrl.redo(); _bump(); }),
+            ],
+            // LSP-powered actions — only shown when an LSP client is attached
+            if (ctrl.hasLsp) [
+              if (!hidden.contains('Peek Def.')) _ToolItem('Peek Def.', Icons.preview, () {
+                _toolbarVisible.value = false;
+                _showPeekPanel();
+              }),
             ],
             if (ctrl.props.extraToolItems.isNotEmpty)
               ctrl.props.extraToolItems
@@ -2816,6 +3039,77 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
         ),
       ),
     );
+  }
+
+  // ── Go-to-line overlay (Ctrl+G) ────────────────────────────────────────
+  Widget _buildGotoLineOverlay(QuillCodeController ctrl, EditorTheme theme) {
+    const ovW = 280.0;
+    const ovH = 44.0;
+    const pad = 8.0;
+    // Position near top-center of the viewport
+    final left = ((_vpSize.width - ovW) / 2).clamp(pad, double.maxFinite);
+    const top = pad;
+    return Positioned(
+      left: left, top: top, width: ovW, height: ovH,
+      child: GotoLineWidget(
+        lineCount: ctrl.content.lineCount,
+        theme: _overlayTheme,
+        onGoto: (line) {
+          ctrl.setCursor(CharPosition(line, 0));
+          _scrollToLine(line);
+          _bump();
+        },
+        onDismiss: () => setState(() => _gotoLineVisible = false),
+      ),
+    );
+  }
+
+  // ── Code lens tap handler ─────────────────────────────────────────────
+  void _handleCodeLensTap(LspCodeLens lens) {
+    final ctrl = widget.controller;
+    // Handle "references" command — navigate to references.
+    if (lens.command?.contains('references') == true ||
+        lens.title?.toLowerCase().contains('reference') == true) {
+      ctrl.lspReferencesAt(lens.range.start).then((locs) {
+        if (!mounted || locs.isEmpty) return;
+        // Navigate to the first reference found.
+        final first = locs.first;
+        ctrl.setCursor(first.range.start);
+        final targetY = first.range.start.line * _lh;
+        if (_vCtrl.hasClients) {
+          _vCtrl.animateTo(targetY,
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeInOut);
+        }
+        _cursorTick.value++;
+      });
+      return;
+    }
+    // Handle "definition" command.
+    if (lens.command?.contains('definition') == true) {
+      ctrl.lspDefinitionAt(lens.range.start).then((locs) {
+        if (!mounted || locs.isEmpty) return;
+        final first = locs.first;
+        ctrl.setCursor(first.range.start);
+        final targetY = first.range.start.line * _lh;
+        if (_vCtrl.hasClients) {
+          _vCtrl.animateTo(targetY,
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeInOut);
+        }
+        _cursorTick.value++;
+      });
+      return;
+    }
+    // Default: move cursor to the lens line.
+    ctrl.setCursor(lens.range.start);
+    final targetY = lens.range.start.line * _lh;
+    if (_vCtrl.hasClients) {
+      _vCtrl.animateTo(targetY,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeInOut);
+    }
+    _cursorTick.value++;
   }
 
   // ── Rename overlay (F2 — inline symbol rename) ─────────────────────────

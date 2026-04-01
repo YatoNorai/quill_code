@@ -2,10 +2,12 @@
 // Granular ValueNotifiers — cursor/selection changes do NOT trigger
 // a full widget rebuild; only the layers that need it repaint.
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'char_position.dart';
 import 'cursor.dart';
+import 'multi_cursor.dart';
 import 'editor_props.dart';
 import 'symbol_pair.dart';
 import '../text/content.dart';
@@ -22,6 +24,7 @@ import '../completion/snippet_controller.dart';
 import '../diagnostics/diagnostics_container.dart';
 import '../diagnostics/diagnostic_region.dart';
 import '../search/editor_searcher.dart';
+import '../search/search_options.dart';
 import '../events/editor_event.dart';
 import '../events/event_manager.dart';
 import '../lsp/lsp_bridge.dart';
@@ -66,6 +69,11 @@ class QuillCodeController extends ChangeNotifier {
 
   late Content          _content;
   late EditorCursor     _cursor;
+  final MultiCursorManager _multiCursor = MultiCursorManager();
+  // ── Column / box selection state ─────────────────────────────────────────
+  bool _columnSelectMode = false;
+  CharPosition? _columnSelectStart;
+
   late EditorProps      _props;
   late EditorSearcher   _searcher;
   late SnippetController _snippetController;
@@ -92,6 +100,11 @@ class QuillCodeController extends ChangeNotifier {
 
   // Debounce for completion
   Timer? _completionDebounce;
+
+  // ── Multi-replace mode (Select All Occurrences) ──────────────────────────
+  bool               _multiReplaceMode    = false;
+  List<EditorRange>  _multiReplaceRanges  = [];
+  String             _multiReplaceOriginal = '';
 
   // ── Ghost text (inline suggestions — Copilot-style) ──────────────────────
   final GhostTextController _ghostText = GhostTextController();
@@ -226,8 +239,45 @@ class QuillCodeController extends ChangeNotifier {
   void notifyVisibleRange(int firstLine, int lastLine) =>
       _analyzeManager.notifyVisibleRange(firstLine, lastLine);
 
+  // ── Auto-surround openers ───────────────────────────────────────────────
+  static const Map<String, String> _surroundPairs = {
+    '(': ')', '[': ']', '{': '}', '"': '"', "'": "'", '`': '`',
+  };
+
   void insertText(String text) {
     if (_props.readOnly) return;
+    // ── Multi-replace fast-path ──────────────────────────────────────────────
+    if (_multiReplaceMode && text.length == 1) {
+      _applyMultiReplace(_multiReplaceOriginal + text);
+      return;
+    }
+    // ── Multi-cursor fast-path ───────────────────────────────────────────────
+    if (hasMultiCursor) { _insertAtAllCursors(text); return; }
+    // ── Auto-surround selection ──────────────────────────────────────────────
+    // When the user has text selected and types an opener char, wrap the
+    // selection with the pair instead of replacing it.
+    if (_cursor.hasSelection && text.length == 1) {
+      final closer = _surroundPairs[text];
+      if (closer != null) {
+        final sel = _cursor.selection;
+        final selected = _content.getTextInRange(sel);
+        final wrapped = '$text$selected$closer';
+        _content.replace(sel, wrapped);
+        // Place cursor after the closer
+        final lines = wrapped.split('\n');
+        final CharPosition newPos;
+        if (lines.length == 1) {
+          newPos = CharPosition(sel.start.line, sel.start.column + wrapped.length);
+        } else {
+          newPos = CharPosition(sel.start.line + lines.length - 1, lines.last.length);
+        }
+        _cursor.moveTo(newPos);
+        _bumpContent();
+        _bumpCursor();
+        notifyListeners();
+        return;
+      }
+    }
     // ── Bracket skip-over ────────────────────────────────────────────────────
     // When the user types a closing bracket (or quote) that was auto-inserted
     // right after the cursor, skip OVER it instead of inserting a duplicate.
@@ -280,6 +330,15 @@ class QuillCodeController extends ChangeNotifier {
 
   void deleteCharBefore() {
     if (_props.readOnly) return;
+    if (_multiReplaceMode) {
+      if (_multiReplaceOriginal.isNotEmpty) {
+        final newWord = _multiReplaceOriginal.substring(0, _multiReplaceOriginal.length - 1);
+        if (newWord.isEmpty) { exitMultiReplaceMode(); return; }
+        _applyMultiReplace(newWord);
+      }
+      return;
+    }
+    if (hasMultiCursor) { _deleteBeforeAllCursors(); return; }
     if (_cursor.hasSelection) { deleteSelection(); return; }
     final pos = _cursor.position;
     if (pos.column > 0) {
@@ -304,6 +363,7 @@ class QuillCodeController extends ChangeNotifier {
 
   void deleteCharAfter() {
     if (_props.readOnly) return;
+    if (hasMultiCursor) { _deleteAfterAllCursors(); return; }
     if (_cursor.hasSelection) { deleteSelection(); return; }
     final pos = _cursor.position;
     final ll = _content.getLineLength(pos.line);
@@ -378,9 +438,7 @@ class QuillCodeController extends ChangeNotifier {
   /// Expand selection to the next enclosing syntax node (tree-sitter powered).
   /// Falls back to selectWord → selectLine → selectAll on non-TS platforms.
   void expandSemanticSelection() {
-    final src  = _content.fullText;
-    final lang = _language.name.toLowerCase();
-    final sel  = _cursor.hasSelection
+    final sel = _cursor.hasSelection
         ? _cursor.selection
         : EditorRange.collapsed(_cursor.position);
 
@@ -565,6 +623,28 @@ class QuillCodeController extends ChangeNotifier {
   Future<List<LspInlayHint>> lspInlayHints(EditorRange range) =>
       _lspBinding?.inlayHintsForRange(range) ?? Future.value([]);
 
+  // ── Code lens cache ────────────────────────────────────────────────────
+  List<LspCodeLens> _codeLensItems = [];
+  int _codeLensVersion = -1;
+
+  /// The most recently fetched code lens items (populated by [refreshCodeLens]).
+  List<LspCodeLens> get codeLensItems => _codeLensItems;
+
+  /// Fetch code lens items from the LSP server for the current document.
+  Future<List<LspCodeLens>> lspCodeLens() =>
+      _lspBinding?.client.codeLens(uri: _lspBinding!.uri) ?? Future.value([]);
+
+  /// Refresh code lens if the document version has changed since the last fetch.
+  /// Notifies listeners on update so the UI repaints.
+  Future<void> refreshCodeLens() async {
+    if (_lspBinding == null) return;
+    final v = _content.documentVersion;
+    if (v == _codeLensVersion) return;
+    _codeLensVersion = v;
+    _codeLensItems = await lspCodeLens();
+    notifyListeners();
+  }
+
   /// Apply LSP format — returns the list of text edits (caller applies them).
   Future<List<LspTextEdit>> lspFormat() =>
       _lspBinding?.format() ?? Future.value([]);
@@ -599,6 +679,76 @@ class QuillCodeController extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ── Multi-replace public API ───────────────────────────────────────────────
+  bool             get isMultiReplaceMode  => _multiReplaceMode;
+  List<EditorRange> get multiReplaceRanges => List.unmodifiable(_multiReplaceRanges);
+  int              get multiReplaceCount   => _multiReplaceRanges.length;
+
+  /// Find all occurrences of the word at cursor (or current selection) and
+  /// enter multi-replace mode so subsequent typing replaces all at once.
+  void selectAllOccurrences() {
+    String word;
+    if (_cursor.hasSelection) {
+      word = _content.getTextInRange(_cursor.selection);
+    } else {
+      word = wordAtCursor;
+    }
+    if (word.isEmpty) return;
+
+    // Use synchronous search so results are available immediately.
+    final ranges = _searcher.searchSync(word, const SearchOptions(
+      caseSensitive: true,
+      type: SearchType.plainText,
+    ));
+
+    _multiReplaceRanges   = List<EditorRange>.from(ranges);
+    _multiReplaceOriginal = word;
+    _multiReplaceMode     = _multiReplaceRanges.length > 0;
+
+    // Select the first occurrence so the user sees what was matched.
+    if (_multiReplaceRanges.isNotEmpty) {
+      _cursor.setRange(_multiReplaceRanges.first);
+      _bumpCursor();
+    }
+    notifyListeners();
+  }
+
+  /// Exit multi-replace mode and clear the search highlight.
+  void exitMultiReplaceMode() {
+    if (!_multiReplaceMode) return;
+    _multiReplaceMode    = false;
+    _multiReplaceRanges  = [];
+    _multiReplaceOriginal = '';
+    _searcher.stopSearch();
+    notifyListeners();
+  }
+
+  /// Called internally from [insertText] when multi-replace mode is active.
+  void _applyMultiReplace(String newWord) {
+    if (_multiReplaceRanges.isEmpty) return;
+    // Sort in reverse document order so earlier replacements don't shift
+    // the positions of later ones.
+    final sorted = List<EditorRange>.from(_multiReplaceRanges)
+      ..sort((a, b) {
+        final lc = b.start.line.compareTo(a.start.line);
+        return lc != 0 ? lc : b.start.column.compareTo(a.start.column);
+      });
+    _content.beginBatchEdit();
+    for (final range in sorted) {
+      _content.replace(range, newWord);
+    }
+    _content.endBatchEdit();
+    // Re-search synchronously to get the updated ranges for the next keystroke.
+    final updated = _searcher.searchSync(newWord, const SearchOptions(
+      caseSensitive: true,
+      type: SearchType.plainText,
+    ));
+    _multiReplaceRanges   = List<EditorRange>.from(updated);
+    _multiReplaceOriginal = newWord;
+    _bumpContent();
+    notifyListeners();
+  }
+
   /// Returns the word text at the current cursor position.
   /// Used to pre-fill the rename input.
   String get wordAtCursor {
@@ -616,6 +766,247 @@ class QuillCodeController extends ChangeNotifier {
       (c >= 97 && c <= 122) || // a-z
       (c >= 48 && c <= 57) ||  // 0-9
       c == 95;                  // _
+
+  // ── Multi-cursor public API ────────────────────────────────────────────
+  MultiCursorManager get multiCursor => _multiCursor;
+  bool get hasMultiCursor => _multiCursor.hasExtras;
+
+  /// Add a cursor on the line above the primary cursor (Ctrl+Alt+Up).
+  void addCursorAbove() {
+    _multiCursor.addLineAbove(_cursor.position, _content);
+    _multiCursor.normalize();
+    _bumpCursor();
+    notifyListeners();
+  }
+
+  /// Add a cursor on the line below the primary cursor (Ctrl+Alt+Down).
+  void addCursorBelow() {
+    _multiCursor.addLineBelow(_cursor.position, _content);
+    _multiCursor.normalize();
+    _bumpCursor();
+    notifyListeners();
+  }
+
+  /// Add or remove a cursor at [pos] (Alt+Click).
+  /// If an extra cursor already sits at [pos] it is removed instead.
+  void addCursorAt(CharPosition pos) {
+    if (_multiCursor.extras.any((c) => c.position == pos)) {
+      _multiCursor.removeAt(pos);
+    } else {
+      _multiCursor.addAt(pos);
+    }
+    _multiCursor.normalize();
+    _bumpCursor();
+    notifyListeners();
+  }
+
+  /// Dismiss all extra cursors (Escape).
+  void clearExtraCursors() {
+    _multiCursor.clear();
+    _columnSelectMode = false;
+    _columnSelectStart = null;
+    _bumpCursor();
+    notifyListeners();
+  }
+
+  /// Ctrl+D — select the next occurrence of the current word (or current
+  /// selection) and add an extra cursor there.
+  void addCursorAtNextOccurrence() {
+    // Determine the search word and make sure the primary cursor has a selection.
+    final word = _cursor.hasSelection
+        ? _content.getTextInRange(_cursor.selection)
+        : wordAtCursor;
+    if (word.isEmpty) return;
+
+    // Ensure the primary cursor *has* a selection matching the word.
+    if (!_cursor.hasSelection) _cursor.selectWord();
+
+    // Collect all occurrence ranges in document order.
+    final text = _content.fullText;
+    final allRanges = <EditorRange>[];
+    int idx = 0;
+    while (true) {
+      final found = text.indexOf(word, idx);
+      if (found < 0) break;
+      final start = _content.offsetToPosition(found);
+      final end   = _content.offsetToPosition(found + word.length);
+      allRanges.add(EditorRange(start, end));
+      idx = found + 1;
+    }
+    if (allRanges.isEmpty) return;
+
+    // Find the next occurrence after the current cursor/extra cursors.
+    final curEnd = _cursor.selection.end;
+    // Also collect positions already occupied by extra cursors.
+    final occupied = _multiCursor.extras.map((c) => c.position).toSet();
+
+    EditorRange? pick;
+    for (final range in allRanges) {
+      if (range.start > curEnd && !occupied.contains(range.end)) {
+        pick = range; break;
+      }
+    }
+    // Wrap around.
+    if (pick == null) {
+      for (final range in allRanges) {
+        if (!occupied.contains(range.end) &&
+            range.start != _cursor.selection.start) {
+          pick = range; break;
+        }
+      }
+    }
+    if (pick == null) return;
+
+    _multiCursor.addAt(pick.end);
+    // Set the anchor/position so the extra cursor has a matching selection.
+    final extra = _multiCursor.extras.lastWhere((c) => c.position == pick!.end);
+    extra.anchor   = pick.start;
+    extra.position = pick.end;
+    _multiCursor.normalize();
+    _bumpCursor();
+    notifyListeners();
+  }
+
+  // ── Column / box selection ─────────────────────────────────────────────
+  bool get columnSelectMode => _columnSelectMode;
+
+  void toggleColumnSelectMode() {
+    _columnSelectMode = !_columnSelectMode;
+    if (!_columnSelectMode) {
+      _columnSelectStart = null;
+      _multiCursor.clear();
+    }
+    _bumpCursor();
+    notifyListeners();
+  }
+
+  void extendColumnSelectionDown() => _extendColumnSelection(1);
+  void extendColumnSelectionUp()   => _extendColumnSelection(-1);
+
+  void _extendColumnSelection(int delta) {
+    _columnSelectStart ??= _cursor.position;
+    final col = _columnSelectStart!.column;
+    final targetLine =
+        (_cursor.position.line + delta).clamp(0, _content.lineCount - 1);
+    _cursor.moveTo(CharPosition(targetLine, col));
+
+    // Rebuild extra cursors to span every line in the column range.
+    _multiCursor.clear();
+    final fromLine = math.min(_columnSelectStart!.line, _cursor.position.line);
+    final toLine   = math.max(_columnSelectStart!.line, _cursor.position.line);
+    for (int l = fromLine; l <= toLine; l++) {
+      if (l == _cursor.position.line) continue; // primary cursor covers this line
+      final lineLen = _content.getLineLength(l);
+      final c = col.clamp(0, lineLen);
+      _multiCursor.addAt(CharPosition(l, c));
+    }
+    _bumpCursor();
+    notifyListeners();
+  }
+
+  // ── Multi-cursor text operations ───────────────────────────────────────
+
+  /// Insert [text] at all cursors (primary + extras) in a single batch undo step.
+  void _insertAtAllCursors(String text) {
+    // Build a unified list: primary cursor first, then extras.
+    // Sort in reverse document order so positions don't shift.
+    final allEntries = <({CharPosition pos, EditorRange? sel, bool isPrimary})>[
+      (pos: _cursor.position, sel: _cursor.hasSelection ? _cursor.selection : null, isPrimary: true),
+      ..._multiCursor.extras.map(
+          (c) => (pos: c.position, sel: c.selection, isPrimary: false)),
+    ]..sort((a, b) {
+        final ap = a.sel?.start ?? a.pos;
+        final bp = b.sel?.start ?? b.pos;
+        final lc = bp.line.compareTo(ap.line);
+        return lc != 0 ? lc : bp.column.compareTo(ap.column);
+      });
+
+    _content.beginBatchEdit();
+    for (final e in allEntries) {
+      if (e.sel != null) _content.delete(e.sel!);
+      final insertPos = e.sel?.start ?? e.pos;
+      _content.insert(insertPos, text);
+    }
+    _content.endBatchEdit();
+
+    // Move primary cursor forward.
+    final pos = _cursor.hasSelection ? _cursor.selection.start : _cursor.position;
+    final lines = text.split('\n');
+    if (lines.length == 1) {
+      _cursor.moveTo(CharPosition(pos.line, pos.column + text.length));
+    } else {
+      _cursor.moveTo(CharPosition(pos.line + lines.length - 1, lines.last.length));
+    }
+    // Move all extra cursors forward by text length (single-line only for now).
+    _multiCursor.moveAllRight(_content);
+    _bumpContent();
+    _bumpCursor();
+    notifyListeners();
+  }
+
+  /// Delete the character before all cursors in a single batch undo step.
+  void _deleteBeforeAllCursors() {
+    // Collect all cursors in reverse document order.
+    final allPos = <CharPosition>[
+      _cursor.position,
+      ..._multiCursor.extras.map((c) => c.position),
+    ]..sort((a, b) {
+        final lc = b.line.compareTo(a.line);
+        return lc != 0 ? lc : b.column.compareTo(a.column);
+      });
+
+    _content.beginBatchEdit();
+    for (final pos in allPos) {
+      if (pos.column > 0) {
+        _content.delete(EditorRange(
+            CharPosition(pos.line, pos.column - 1), pos));
+      } else if (pos.line > 0) {
+        final prevLine = pos.line - 1;
+        final plLen = _content.getLineLength(prevLine);
+        _content.delete(EditorRange(CharPosition(prevLine, plLen), pos));
+      }
+    }
+    _content.endBatchEdit();
+
+    // Move primary cursor.
+    final pp = _cursor.position;
+    if (pp.column > 0) {
+      _cursor.moveTo(CharPosition(pp.line, pp.column - 1));
+    } else if (pp.line > 0) {
+      final prevLine = pp.line - 1;
+      _cursor.moveTo(CharPosition(prevLine, _content.getLineLength(prevLine)));
+    }
+    _multiCursor.moveAllLeft(_content);
+    _bumpContent();
+    _bumpCursor();
+    notifyListeners();
+  }
+
+  /// Delete the character after all cursors in a single batch undo step.
+  void _deleteAfterAllCursors() {
+    final allPos = <CharPosition>[
+      _cursor.position,
+      ..._multiCursor.extras.map((c) => c.position),
+    ]..sort((a, b) {
+        final lc = b.line.compareTo(a.line);
+        return lc != 0 ? lc : b.column.compareTo(a.column);
+      });
+
+    _content.beginBatchEdit();
+    for (final pos in allPos) {
+      final ll = _content.getLineLength(pos.line);
+      if (pos.column < ll) {
+        _content.delete(EditorRange(pos, CharPosition(pos.line, pos.column + 1)));
+      } else if (pos.line < _content.lineCount - 1) {
+        _content.delete(EditorRange(pos, CharPosition(pos.line + 1, 0)));
+      }
+    }
+    _content.endBatchEdit();
+
+    _bumpContent();
+    _bumpCursor();
+    notifyListeners();
+  }
 
   void setDiagnostics(List<DiagnosticRegion> regions) {
     _diagnostics.setDiagnostics(regions);

@@ -84,6 +84,7 @@ export 'src/widgets/symbol_input_bar.dart';
 export 'src/widgets/minimap_widget.dart';
 export 'src/widgets/status_bar_widget.dart';
 export 'src/widgets/breadcrumbs_widget.dart';
+export 'src/widgets/peek_panel_widget.dart';
 
 export 'src/actions/code_action.dart';
 export 'src/actions/code_action_provider.dart';
@@ -98,6 +99,7 @@ export 'src/text/bracket_matcher.dart';
 
 export 'src/completion/ghost_text_controller.dart';
 export 'src/completion/ghost_text_providers.dart';
+export 'src/completion/ai_ghost_text_providers.dart';
 export 'src/completion/flutter_snippets.dart';
 export 'src/theme/vscode_theme_parser.dart';
 export 'src/theme/theme_helpers.dart';

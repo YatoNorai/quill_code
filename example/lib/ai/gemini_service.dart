@@ -130,9 +130,9 @@ class GeminiService {
     client.connectionTimeout = timeout;
 
     try {
-      final req = await client.postUrl(uri)
-        ..headers.set(HttpHeaders.contentTypeHeader, 'application/json')
-        ..write(body);
+      final req = await client.postUrl(uri);
+      req.headers.set(HttpHeaders.contentTypeHeader, 'application/json; charset=utf-8');
+      req.add(utf8.encode(body));
       final res = await req.close().timeout(timeout);
 
       final raw = await res.transform(utf8.decoder).join();
@@ -159,9 +159,9 @@ class GeminiService {
     if (after.length > 400)   after   = after.substring(0, 400);
 
     return 'Complete the code. Output ONLY what goes after <CURSOR>.\n'
-        'Line prefix already typed: "\${ctx.linePrefix}" — do NOT repeat it.\n\n'
-        '<BEFORE>\n\$before<CURSOR>\n</BEFORE>\n\n'
-        '<AFTER>\n\$after\n</AFTER>\n\n'
+        'Line prefix already typed: "${ctx.linePrefix}" — do NOT repeat it.\n\n'
+        '<BEFORE>\n$before<CURSOR>\n</BEFORE>\n\n'
+        '<AFTER>\n$after\n</AFTER>\n\n'
         'Reply with only the missing code. No markdown.';
   }
 

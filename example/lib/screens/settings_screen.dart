@@ -313,9 +313,9 @@ class _SettingsScreenState extends State<SettingsScreen>
         _dropdownRow('Modelo', _ai.geminiModel, _geminiModels, (v) {
           setState(() => _ai = _ai.copyWith(geminiModel: v)); }),
         _infoCard(
-          '💡 Recomendado: gemini-2.5-flash-preview (melhor custo-benefício)\n'
-          'Melhor custo-benefício para completions de código. '
-          'Gemini 2.5 Pro é mais preciso mas mais lento.',
+          '💡 Recomendado: gemini-2.5-flash (melhor custo-benefício)\n'
+          'Rápido e econômico para completions de código. '
+          'Gemini 2.5 Pro é mais preciso mas mais lento e caro.',
         ),
       ]),
 
@@ -617,12 +617,8 @@ class _SettingsScreenState extends State<SettingsScreen>
   ];
 
   static const _geminiModels = [
-    'gemini-2.5-flash-preview-04-17',
-    'gemini-2.5-pro-preview-03-25',
-    'gemini-2.0-flash',
-    'gemini-2.0-flash-lite',
-    'gemini-1.5-flash',
-    'gemini-1.5-pro',
+    'gemini-2.5-flash',
+    'gemini-2.5-pro',
   ];
 
   static const _agentModes = <AgentMode, (String, String)>{

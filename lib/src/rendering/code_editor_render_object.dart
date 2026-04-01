@@ -2,6 +2,7 @@
 import 'dart:math' as math;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/painting.dart';
+import 'package:flutter/scheduler.dart';
 import '../core/editor_controller.dart';
 import '../core/char_position.dart';
 import '../core/editor_props.dart';
@@ -96,7 +97,20 @@ class CodeEditorRenderObject extends RenderBox {
 
   void _onChange() {
     final v = _controller.content.documentVersion;
-    if (v != _lastDocVersion) _lastDocVersion = v;
+    if (v != _lastDocVersion) {
+      _lastDocVersion = v;
+      // Schedule O(n) bracket computation AFTER the current frame so it never
+      // blocks paint. One frame of stale depths is acceptable.
+      if (_theme.bracketColorization.enabled) {
+        SchedulerBinding.instance.addPostFrameCallback((_) {
+          if (!attached) return;
+          final newV = _controller.content.documentVersion;
+          _bracketDepthMap = _computeBracketDepths(_controller.content.fullText);
+          _bracketDepthVersion = newV;
+          markNeedsPaint();
+        });
+      }
+    }
     markNeedsLayout();
   }
 
@@ -187,6 +201,11 @@ class CodeEditorRenderObject extends RenderBox {
 
     // 10. Cursor
     _paintCursor(canvas, offset, cs, scrollY, scrollX);
+
+    // 10b. Extra cursors (multi-cursor)
+    if (_controller.hasMultiCursor) {
+      _paintExtraCursors(canvas, offset, cs, firstLine, lastLine, scrollY, scrollX);
+    }
 
     // 11. Sticky scroll
     if (_controller.props.stickyScroll && _controller.stickyLines.isNotEmpty) {
@@ -628,10 +647,8 @@ class CodeEditorRenderObject extends RenderBox {
   // ── Bracket colorization helpers ─────────────────────────────────────────
 
   void _ensureBracketDepths() {
-    final v = _controller.content.documentVersion;
-    if (v == _bracketDepthVersion) return;
-    _bracketDepthVersion = v;
-    _bracketDepthMap = _computeBracketDepths(_controller.content.fullText);
+    // Depths are updated asynchronously in _onChange via addPostFrameCallback.
+    // Nothing to do here — stale-by-one-frame is acceptable.
   }
 
   static Map<int, List<({int col, int depth})>> _computeBracketDepths(String text) {
@@ -762,6 +779,48 @@ class CodeEditorRenderObject extends RenderBox {
                 const Radius.circular(2)),
             Paint()..color = hint.color!);
       }
+    }
+  }
+
+  // ── Extra cursors (multi-cursor) ─────────────────────────────────────────
+
+  void _paintExtraCursors(Canvas canvas, Offset offset, EditorColorScheme cs,
+      int firstLine, int lastLine, double sy, double sx) {
+    final extras = _controller.multiCursor.extras;
+    if (extras.isEmpty) return;
+    // Selection highlight paint reused for extra selection regions.
+    final selPaint = Paint()..color = cs.selectionColor.withOpacity(0.3);
+
+    for (final extra in extras) {
+      final line = extra.position.line;
+
+      // Paint extra selection first (behind cursor line).
+      if (extra.hasSelection) {
+        final sel = extra.selection!;
+        for (int l = math.max(firstLine, sel.start.line);
+            l <= math.min(lastLine, sel.end.line);
+            l++) {
+          final lineLen = _controller.content.getLineLength(l);
+          double x1 = offset.dx + _gutterWidth - sx;
+          double x2 = offset.dx + _gutterWidth + lineLen * _cw - sx;
+          if (l == sel.start.line) x1 = offset.dx + _gutterWidth + sel.start.column * _cw - sx;
+          if (l == sel.end.line)   x2 = offset.dx + _gutterWidth + sel.end.column * _cw - sx;
+          final y = offset.dy + l * _lh - sy;
+          if (x2 > x1) canvas.drawRect(Rect.fromLTWH(x1, y, x2 - x1, _lh), selPaint);
+        }
+      }
+
+      // Paint extra cursor line.
+      if (line < firstLine || line > lastLine) continue;
+      final y = offset.dy + line * _lh - sy;
+      final x = offset.dx + _gutterWidth +
+          extra.position.column.clamp(
+                  0, _controller.content.getLineLength(line)) *
+              _cw -
+          sx;
+      _cursorPaint.color =
+          cs.cursor.withOpacity((_cursorAlpha * 0.8).clamp(0.0, 1.0));
+      canvas.drawLine(Offset(x, y + 2), Offset(x, y + _lh - 2), _cursorPaint);
     }
   }
 

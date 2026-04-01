@@ -18,20 +18,29 @@ class QuillActionsMenu extends StatefulWidget {
   final QuillCodeController controller;
   final EditorTheme         theme;
   final VoidCallback?       onClose;
+  /// Called when the user selects "Go to Line" from the menu.
+  /// The host widget should show the go-to-line overlay in response.
+  final VoidCallback?       onGotoLine;
+  /// Called when the user selects "Format Document" from the menu.
+  final VoidCallback?       onFormatDocument;
 
   const QuillActionsMenu({
     super.key,
     required this.controller,
     required this.theme,
     this.onClose,
+    this.onGotoLine,
+    this.onFormatDocument,
   });
 
   /// Shows the action menu as a modal overlay.
   static Future<void> show(
     BuildContext context,
     QuillCodeController controller,
-    EditorTheme theme,
-  ) {
+    EditorTheme theme, {
+    VoidCallback? onGotoLine,
+    VoidCallback? onFormatDocument,
+  }) {
     return showDialog<void>(
       context: context,
       barrierColor: Colors.transparent,
@@ -39,6 +48,8 @@ class QuillActionsMenu extends StatefulWidget {
         controller: controller,
         theme: theme,
         onClose: () => Navigator.of(context, rootNavigator: true).pop(),
+        onGotoLine: onGotoLine,
+        onFormatDocument: onFormatDocument,
       ),
     );
   }
@@ -58,7 +69,34 @@ class _QuillActionsMenuState extends State<QuillActionsMenu> {
   @override
   void initState() {
     super.initState();
-    _actions  = StandardEditorActions.build();
+    final base = StandardEditorActions.build();
+    // Append widget-level actions (Go to Line, Format Document) that need
+    // callbacks into the host widget rather than pure controller calls.
+    final extra = <QuillEditorAction>[
+      if (widget.onGotoLine != null)
+        QuillEditorAction(
+          title: 'Go to Line\u2026',
+          icon: Icons.vertical_align_center,
+          shortcut: 'Ctrl+G',
+          dividerBefore: true,
+          execute: (_) async {
+            widget.onClose?.call();
+            widget.onGotoLine!();
+          },
+        ),
+      if (widget.onFormatDocument != null)
+        QuillEditorAction(
+          title: 'Format Document',
+          icon: Icons.auto_fix_high,
+          shortcut: 'Shift+Alt+F',
+          dividerBefore: widget.onGotoLine == null,
+          execute: (_) async {
+            widget.onClose?.call();
+            widget.onFormatDocument!();
+          },
+        ),
+    ];
+    _actions  = [...base, ...extra];
     _filtered = _actions;
     WidgetsBinding.instance.addPostFrameCallback((_) => _focus.requestFocus());
   }

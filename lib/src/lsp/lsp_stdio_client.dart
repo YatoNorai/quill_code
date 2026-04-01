@@ -503,6 +503,49 @@ class LspStdioClient implements LspClient {
   }
 
   @override
+  Future<List<LspCodeLens>> codeLens({required String uri}) async {
+    if (!_ready) return [];
+    final resp = await _sendRequest('textDocument/codeLens', {
+      'textDocument': {'uri': uri},
+    });
+    final result = resp['result'];
+    if (result is! List) return [];
+    return result.map((item) {
+      final m = item as Map;
+      final range = _decodeRange(m['range'] as Map);
+      final cmd = m['command'] as Map?;
+      return LspCodeLens(
+        range:       range,
+        title:       cmd?['title'] as String?,
+        command:     cmd?['command'] as String?,
+        commandArgs: cmd?['arguments'] as List?,
+        data:        m['data'] as Map<String, dynamic>?,
+      );
+    }).toList();
+  }
+
+  @override
+  Future<LspCodeLens?> resolveCodeLens(LspCodeLens item) async {
+    if (!_ready || item.data == null) return item;
+    try {
+      final resp = await _sendRequest('codeLens/resolve', {
+        'range': _encodeRange(item.range),
+        if (item.data != null) 'data': item.data,
+      });
+      final result = resp['result'];
+      if (result is! Map) return null;
+      final cmd = result['command'] as Map?;
+      return LspCodeLens(
+        range:       item.range,
+        title:       cmd?['title'] as String? ?? item.title,
+        command:     cmd?['command'] as String? ?? item.command,
+        commandArgs: cmd?['arguments'] as List? ?? item.commandArgs,
+        data:        item.data,
+      );
+    } catch (_) { return null; }
+  }
+
+  @override
   Future<LspCompletionResult?> resolveCompletion(LspCompletionResult item) async {
     if (!_ready) return null;
     try {

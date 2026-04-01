@@ -267,6 +267,31 @@ class StandardEditorActions {
         if (trimmed != ctrl.text) ctrl.setText(trimmed);
       },
     ),
+
+    // ── LSP ───────────────────────────────────────────────────────────────────
+    QuillEditorAction(
+      title: 'Format Document',
+      icon: Icons.auto_fix_high,
+      shortcut: 'Shift+Alt+F',
+      dividerBefore: true,
+      execute: (ctrl) async {
+        if (!ctrl.hasLsp) return;
+        final edits = await ctrl.lspFormat();
+        if (edits.isEmpty) return;
+        final sorted = List.of(edits)
+          ..sort((a, b) {
+            final lc = b.range.start.line.compareTo(a.range.start.line);
+            if (lc != 0) return lc;
+            return b.range.start.column.compareTo(a.range.start.column);
+          });
+        ctrl.content.beginBatchEdit();
+        for (final e in sorted) {
+          ctrl.content.replace(e.range, e.newText);
+        }
+        ctrl.content.endBatchEdit();
+        ctrl.notifyListeners();
+      },
+    ),
   ];
 
   static String _getIndent(QuillCodeController ctrl, int line) {

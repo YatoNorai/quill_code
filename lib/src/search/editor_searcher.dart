@@ -40,6 +40,23 @@ class EditorSearcher {
     _schedule();
   }
 
+  /// Synchronous search — runs immediately (no debounce timer) and updates
+  /// internal state so the visual search highlight reflects the results right
+  /// away. Returns the found ranges so callers can use them without waiting
+  /// for the async stream.
+  List<EditorRange> searchSync(String pattern, SearchOptions options) {
+    if (pattern.isEmpty) return [];
+    _currentPattern = pattern;
+    _searchOptions = options;
+    _debounce?.cancel();
+    final text = _content.fullText;
+    final results = _findAll(text, pattern, options);
+    _results = results;
+    _currentResultIndex = results.isEmpty ? -1 : 0;
+    if (!_resultsController.isClosed) _resultsController.add(_results);
+    return List.unmodifiable(_results);
+  }
+
   void stopSearch() {
     _currentPattern = null;
     _patternError = null;
