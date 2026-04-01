@@ -522,12 +522,73 @@ class CodeEditorRenderObject extends RenderBox {
     final textX = offset.dx + _gutterWidth - sx;
     final spans = _controller.styles.spansForLine(line);
 
+    // Build bracket color override map for this line (O(1) after cache hit).
+    final colorizationTheme = _theme.bracketColorization;
+    Map<int, Color>? bracketColors;
+    if (colorizationTheme.enabled) {
+      _ensureBracketDepths();
+      final depths = _bracketDepthMap[line];
+      if (depths != null && depths.isNotEmpty) {
+        bracketColors = {};
+        for (final entry in depths) {
+          bracketColors[entry.col] = entry.depth < 0
+              ? colorizationTheme.mismatchColor
+              : colorizationTheme.colors[entry.depth % colorizationTheme.colors.length];
+        }
+      }
+    }
+
+    // Helper: split a text segment [from, to) applying per-column bracket overrides.
+    void addSegment(List<TextSpan> out, TextStyle base, Color tokenColor,
+        String fullLine, int from, int to) {
+      if (bracketColors == null) {
+        final seg = fullLine.substring(from, to);
+        if (seg.isNotEmpty) out.add(TextSpan(text: seg, style: base.copyWith(color: tokenColor)));
+        return;
+      }
+      int cur = from;
+      while (cur < to) {
+        final override = bracketColors[cur];
+        if (override != null) {
+          // Flush plain segment before this bracket
+          if (cur > from) {
+            out.add(TextSpan(text: fullLine.substring(from, cur), style: base.copyWith(color: tokenColor)));
+          }
+          out.add(TextSpan(text: fullLine[cur], style: base.copyWith(color: override)));
+          cur++;
+          from = cur;
+        } else {
+          cur++;
+        }
+      }
+      if (from < to) {
+        out.add(TextSpan(text: fullLine.substring(from, to), style: base.copyWith(color: tokenColor)));
+      }
+    }
+
     if (spans.isEmpty) {
-      _drawText(canvas, lineText,
-          Offset(textX, y + _lh / 2),
-          color: cs.textNormal,
+      if (bracketColors == null) {
+        _drawText(canvas, lineText,
+            Offset(textX, y + _lh / 2),
+            color: cs.textNormal,
+            fontSize: _theme.fontSize,
+            fontFamily: _theme.fontFamily);
+      } else {
+        final textSpans = <TextSpan>[];
+        final baseStyle = TextStyle(
           fontSize: _theme.fontSize,
-          fontFamily: _theme.fontFamily);
+          fontFamily: _theme.fontFamily,
+          letterSpacing: _theme.letterSpacing,
+        );
+        addSegment(textSpans, baseStyle, cs.textNormal, lineText, 0, lineText.length);
+        if (textSpans.isNotEmpty) {
+          final tp = TextPainter(
+              text: TextSpan(children: textSpans),
+              textDirection: TextDirection.ltr)
+            ..layout();
+          tp.paint(canvas, Offset(textX, y + (_lh - tp.height) / 2));
+        }
+      }
     } else {
       final textSpans = <TextSpan>[];
       final baseStyle = TextStyle(
@@ -537,12 +598,8 @@ class CodeEditorRenderObject extends RenderBox {
       );
       // Prepend any text before the first span (uncaptured leading text).
       if (spans.first.column > 0) {
-        final pre = lineText.substring(0, spans.first.column.clamp(0, lineText.length));
-        if (pre.isNotEmpty) {
-          textSpans.add(TextSpan(
-              text: pre,
-              style: baseStyle.copyWith(color: cs.textNormal)));
-        }
+        final preEnd = spans.first.column.clamp(0, lineText.length);
+        addSegment(textSpans, baseStyle, cs.textNormal, lineText, 0, preEnd);
       }
       for (int i = 0; i < spans.length; i++) {
         final span = spans[i];
@@ -550,16 +607,13 @@ class CodeEditorRenderObject extends RenderBox {
         if (span.column >= lineText.length) break;
         final end = nextCol.clamp(span.column, lineText.length);
         if (end <= span.column) continue;
-        final seg = lineText.substring(span.column, end);
         final colorKey = tokenToColorKey[span.type] ?? 'textNormal';
-        final color = cs.colorForToken(colorKey);
-        textSpans.add(TextSpan(
-            text: seg,
-            style: baseStyle.copyWith(
-              color: color,
-              fontWeight: span.style.bold ? FontWeight.bold : FontWeight.normal,
-              fontStyle: span.style.italic ? FontStyle.italic : FontStyle.normal,
-            )));
+        final tokenColor = cs.colorForToken(colorKey);
+        final spanBase = baseStyle.copyWith(
+          fontWeight: span.style.bold ? FontWeight.bold : FontWeight.normal,
+          fontStyle:  span.style.italic ? FontStyle.italic : FontStyle.normal,
+        );
+        addSegment(textSpans, spanBase, tokenColor, lineText, span.column, end);
       }
       if (textSpans.isNotEmpty) {
         final tp = TextPainter(
@@ -569,6 +623,56 @@ class CodeEditorRenderObject extends RenderBox {
         tp.paint(canvas, Offset(textX, y + (_lh - tp.height) / 2));
       }
     }
+  }
+
+  // ── Bracket colorization helpers ─────────────────────────────────────────
+
+  void _ensureBracketDepths() {
+    final v = _controller.content.documentVersion;
+    if (v == _bracketDepthVersion) return;
+    _bracketDepthVersion = v;
+    _bracketDepthMap = _computeBracketDepths(_controller.content.fullText);
+  }
+
+  static Map<int, List<({int col, int depth})>> _computeBracketDepths(String text) {
+    final result = <int, List<({int col, int depth})>>{};
+    // Stack holds (opener char, line, col) for unmatched openers.
+    final stack = <({String ch, int line, int col})>[];
+    const openers = {'(', '[', '{'};
+    const pairs   = {')': '(', ']': '[', '}': '{'};
+    int line = 0, col = 0, depth = 0;
+
+    void record(int l, int c, int d) =>
+        (result[l] ??= []).add((col: c, depth: d));
+
+    for (int i = 0; i < text.length; i++) {
+      final ch = text[i];
+      if (ch == '\n') { line++; col = 0; continue; }
+      if (openers.contains(ch)) {
+        record(line, col, depth);
+        stack.add((ch: ch, line: line, col: col));
+        depth++;
+      } else if (pairs.containsKey(ch)) {
+        if (stack.isNotEmpty && stack.last.ch == pairs[ch]) {
+          stack.removeLast();
+          depth--;
+          record(line, col, depth);
+        } else {
+          // Mismatched closer — mark as error depth
+          record(line, col, -1);
+        }
+      }
+      col++;
+    }
+    // Any unclosed openers are also mismatched
+    for (final u in stack) {
+      final list = result[u.line];
+      if (list != null) {
+        final idx = list.indexWhere((e) => e.col == u.col);
+        if (idx >= 0) list[idx] = (col: u.col, depth: -1);
+      }
+    }
+    return result;
   }
 
   void _drawText(Canvas canvas, String text, Offset center,
