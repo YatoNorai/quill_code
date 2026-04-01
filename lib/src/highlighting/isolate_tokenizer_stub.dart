@@ -1,67 +1,87 @@
 // lib/src/highlighting/isolate_tokenizer_stub.dart
 //
 // Web stub: dart:isolate not available on web.
-// Runs tokenization synchronously on the main thread (small files only).
-// For large files on web, only the visible region is tokenized.
+// Mirrors the IsolateTokenizer.shared singleton API from the real impl.
+// Tokenization runs synchronously on the main thread in small chunks.
 
 import 'dart:async';
 import 'span.dart';
 import 'code_block.dart';
-import '../language/_regex_language.dart';
 
 typedef SpansCallback  = void Function(int version, List<List<CodeSpan>> spans, bool isFinal, int upTo);
 typedef BlocksCallback = void Function(int version, List<CodeBlock> blocks);
 
-class IsolateTokenizer {
+class _ManagerEntry {
   final SpansCallback  onSpans;
   final BlocksCallback onBlocks;
+  String  langName = '';
+  List<Map<String, dynamic>> rules   = const [];
+  Map<String, int>           wordMap = const {};
+  int currentVersion = -1;
+  bool destroyed = false;
 
-  List<Map<String, dynamic>> _rules = const [];
-  Map<String, int>           _wordMap = const {};
-  bool _destroyed = false;
+  _ManagerEntry({required this.onSpans, required this.onBlocks});
+}
 
-  IsolateTokenizer({required this.onSpans, required this.onBlocks});
+class IsolateTokenizer {
+  static final IsolateTokenizer shared = IsolateTokenizer._();
+  IsolateTokenizer._();
 
-  void setRules(List<Map<String, dynamic>> rules, Map<String, int> wordMap) {
-    _rules   = rules;
-    _wordMap = wordMap;
+  final Map<String, _ManagerEntry> _managers = {};
+  int _nextId = 0;
+
+  String registerManager({
+    required SpansCallback  onSpans,
+    required BlocksCallback onBlocks,
+  }) {
+    final id = (_nextId++).toString();
+    _managers[id] = _ManagerEntry(onSpans: onSpans, onBlocks: onBlocks);
+    return id;
   }
 
-  Future<void> tokenize(List<String> lines, int version) async {
-    if (_destroyed) return;
+  void unregisterManager(String managerId) {
+    _managers[managerId]?.destroyed = true;
+    _managers.remove(managerId);
+  }
 
-    // Yield to allow the UI to paint before we do synchronous work.
+  void setRules(String managerId, String langName,
+      List<Map<String, dynamic>> rules, Map<String, int> wordMap) {
+    final entry = _managers[managerId];
+    if (entry == null) return;
+    entry.langName = langName;
+    entry.rules    = rules;
+    entry.wordMap  = wordMap;
+  }
+
+  Future<void> tokenize(String managerId, List<String> lines, int version) async {
+    final entry = _managers[managerId];
+    if (entry == null) return;
+    entry.currentVersion = version;
+
     await Future.delayed(Duration.zero);
-    if (_destroyed) return;
+    if (_managers[managerId] == null || entry.currentVersion != version) return;
 
-    // Build compiled rules from the payload map.
-    final compiled = _rules
-        .map((r) => (
-              RegExp(r['p'] as String),
-              TokenType.values[r['t'] as int]
-            ))
+    final compiled = entry.rules
+        .map((r) => (RegExp(r['p'] as String), TokenType.values[r['t'] as int]))
         .toList();
 
-    // Tokenize in chunks so the event loop gets slots between chunks.
     const chunkSize = 100;
     final spans = <List<CodeSpan>>[];
     for (int i = 0; i < lines.length; i++) {
-      spans.add(_tokenizeLine(lines[i], compiled, _wordMap));
-      if (i % chunkSize == chunkSize - 1 && !_destroyed) {
-        onSpans(version, List.unmodifiable(spans), false, i);
+      spans.add(_tokenizeLine(lines[i], compiled, entry.wordMap));
+      if (i % chunkSize == chunkSize - 1) {
+        final e = _managers[managerId];
+        if (e == null || e.currentVersion != version) return;
+        e.onSpans(version, List.unmodifiable(spans), false, i);
         await Future.delayed(Duration.zero);
-        if (_destroyed) return;
       }
     }
-    if (!_destroyed) {
-      // Extract blocks
-      final blocks = _extractBlocks(lines);
-      onBlocks(version, blocks);
-      onSpans(version, List.unmodifiable(spans), true, -1);
-    }
+    final e = _managers[managerId];
+    if (e == null || e.currentVersion != version) return;
+    final blocks = _extractBlocks(lines);
+    e.onBlocks(version, blocks);
+    e.onSpans(version, List.unmodifiable(spans), true, -1);
   }
-
-  void destroy() => _destroyed = true;
 
   static List<CodeSpan> _tokenizeLine(
       String line,
@@ -88,23 +108,17 @@ class IsolateTokenizer {
   }
 
   static List<CodeBlock> _extractBlocks(List<String> lines) {
-    // Lightweight brace-matching block extractor.
     final blocks = <CodeBlock>[];
-    final stack  = <(int line, int indent)>[];
+    final stack  = <(int, int)>[];
     for (int i = 0; i < lines.length; i++) {
       final ln = lines[i];
       int indent = 0;
-      while (indent < ln.length && (ln[indent] == ' ' || ln[indent] == '\t')) {
-        indent++;
-      }
+      while (indent < ln.length && (ln[indent] == ' ' || ln[indent] == '\t')) indent++;
       for (int ci = 0; ci < ln.length; ci++) {
         if (ln[ci] == '{') stack.add((i, indent));
         if (ln[ci] == '}' && stack.isNotEmpty) {
-          final (startLine, startIndent) = stack.removeLast();
-          if (i > startLine) {
-            blocks.add(CodeBlock(
-                startLine: startLine, endLine: i, indent: startIndent));
-          }
+          final (sl, si) = stack.removeLast();
+          if (i > sl) blocks.add(CodeBlock(startLine: sl, endLine: i, indent: si));
         }
       }
     }

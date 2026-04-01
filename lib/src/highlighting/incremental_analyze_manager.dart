@@ -159,8 +159,9 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
   // _onBlockRescanFrame() runs in the next frame and calls _extractCodeBlocksUI.
   bool _blockRescanPending = false;
 
-  // ── Isolate tokenizer ─────────────────────────────────────────────────────
-  IsolateTokenizer? _iso;
+  // ── Shared isolate manager ID ─────────────────────────────────────────────
+  // Registered with IsolateTokenizer.shared on first use; unregistered on destroy.
+  String? _managerId;
 
   // ── Incremental frame-budget (keystroke convergence only) ─────────────────
   int  _jobTotal       = 0;
@@ -240,16 +241,20 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
     } finally { arena.releaseAll(); }
   }
 
-  // ── Isolate setup ─────────────────────────────────────────────────────────
+  // ── Shared isolate registration ───────────────────────────────────────────
 
-  IsolateTokenizer _getOrCreateIso() {
-    if (_iso != null) return _iso!;
-    _iso = IsolateTokenizer(onSpans: _onIsoSpans, onBlocks: _onIsoBlocks);
+  String _ensureRegistered() {
+    if (_managerId != null) return _managerId!;
+    _managerId = IsolateTokenizer.shared.registerManager(
+      onSpans:  _onIsoSpans,
+      onBlocks: _onIsoBlocks,
+    );
     if (language is RegexLanguage) {
       final rl = language as RegexLanguage;
-      _iso!.setRules(rl.isolateRulePayload, rl.isolateWordMap);
+      IsolateTokenizer.shared.setRules(
+          _managerId!, language.name, rl.isolateRulePayload, rl.isolateWordMap);
     }
-    return _iso!;
+    return _managerId!;
   }
 
   // ── Isolate callbacks ─────────────────────────────────────────────────────
@@ -393,7 +398,7 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
     } else {
       _jobIsFull  = false;
       final lines = List<String>.generate(lineCount, content.getLineText);
-      _getOrCreateIso().tokenize(lines, version);
+      IsolateTokenizer.shared.tokenize(_ensureRegistered(), lines, version);
     }
   }
 
@@ -677,7 +682,7 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
       } else {
         _jobIsFull  = false;
         final lines = List<String>.generate(lineCount, content.getLineText);
-        _getOrCreateIso().tokenize(lines, version);
+        IsolateTokenizer.shared.tokenize(_ensureRegistered(), lines, version);
       }
     }
   }
@@ -900,8 +905,10 @@ class IncrementalAnalyzeManager extends AnalyzeManager {
   void destroy() {
     _destroyed = true;
     _debounceTimer?.cancel();
-    _iso?.destroy();
-    _iso                = null;
+    if (_managerId != null) {
+      IsolateTokenizer.shared.unregisterManager(_managerId!);
+      _managerId = null;
+    }
     _jobTotal           = 0;
     _jobIsFull          = false;
     _partialSpans       = null;

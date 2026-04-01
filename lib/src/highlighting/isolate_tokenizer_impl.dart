@@ -1,28 +1,30 @@
 // lib/src/highlighting/isolate_tokenizer.dart
 //
-// Persistent isolate for full-document tokenization + code-block extraction.
+// Shared single isolate for full-document tokenization + code-block extraction.
 //
 // Architecture
 // ────────────
-//   • One long-lived Dart Isolate per editor instance (spawned lazily).
-//     RegExp objects compiled once in the isolate, reused across jobs.
-//   • UI thread sends jobs via SendPort; isolate replies via its own SendPort.
-//   • Jobs are versioned — stale results silently discarded on the UI side.
+//   • ONE long-lived Dart Isolate shared by ALL editor instances.
+//     Opening 10 files spawns exactly 1 isolate, not 10.
+//   • Each IncrementalAnalyzeManager registers with a unique managerId.
+//   • Jobs are tagged with managerId so results route to the right manager.
+//   • Rules cached per language name in the isolate — sent once per lang.
+//   • Version checking is per-manager — stale results silently discarded.
 //   • Result data transferred as TransferableTypedData (zero-copy channel).
 //   • Progressive span updates every _kChunk lines for large files.
 //
 // Message protocol
 // ────────────────
 // UI → Isolate:
-//   {'cmd':'job','lines':List<String>,'version':int,
-//    /* first job */ 'rules':[{'p':pattern,'t':typeIdx}], 'wordMap':{...}}
+//   {'cmd':'job','managerId':id,'langName':lang,'lines':List<String>,'version':int,
+//    /* first job for this lang */ 'rules':[{'p':pattern,'t':typeIdx}],'wordMap':{...}}
 //   {'cmd':'destroy'}
 //
 // Isolate → UI:
-//   {'cmd':'ready','port':SendPort}                    (once, on spawn)
-//   {'cmd':'progress','version':int,'data':TTD}        (Uint32List spans)
-//   {'cmd':'spans',   'version':int,'data':TTD}        (Uint32List final spans)
-//   {'cmd':'blocks',  'version':int,'data':TTD}        (Int32List blocks)
+//   {'cmd':'ready','port':SendPort}                                (once, on spawn)
+//   {'cmd':'progress','managerId':id,'version':int,'upTo':int,'data':TTD}
+//   {'cmd':'spans',   'managerId':id,'version':int,'data':TTD}
+//   {'cmd':'blocks',  'managerId':id,'version':int,'data':TTD}
 
 import 'dart:async';
 import 'dart:isolate';
@@ -95,7 +97,11 @@ class _IsoRule {
   _IsoRule(String p, this.typeIdx) : re = RegExp(p);
 }
 
-// Module-level variables live in isolate heap → survive between jobs.
+// Per-language rule cache — populated on first job for each language.
+final Map<String, List<_IsoRule>>   _langRules   = {};
+final Map<String, Map<String, int>> _langWordMap = {};
+
+// Current rules (set before each job from the language cache).
 List<_IsoRule>   _isoRules   = const [];
 Map<String, int> _isoWordMap = const {};
 
@@ -112,8 +118,6 @@ List<CodeSpan> _tokenizeLine(String line) {
     final isWord  = (c0 >= 65 && c0 <= 90) || (c0 >= 97 && c0 <= 122) || c0 == 95;
 
     if (isWord) {
-      // Consume entire identifier in one pass (avoids re-entering rule loop
-      // for every character of a long name like `_cachedFoldFree`).
       int end = pos + 1;
       while (end < len) {
         final c = line.codeUnitAt(end);
@@ -122,16 +126,16 @@ List<CodeSpan> _tokenizeLine(String line) {
       }
       final word = line.substring(pos, end);
 
-      final mapped = wordMap[word]; // O(1): keyword / type / built-in
+      final mapped = wordMap[word];
       if (mapped != null) {
         spans.add(CodeSpan(column: pos, type: TokenType.values[mapped]));
         pos = end; continue;
       }
-      if (c0 >= 65 && c0 <= 90) {          // UpperCase → class/type
+      if (c0 >= 65 && c0 <= 90) {
         spans.add(CodeSpan(column: pos, type: TokenType.type_));
         pos = end; continue;
       }
-      if (end < len && line.codeUnitAt(end) == 40) { // followed by '(' → func
+      if (end < len && line.codeUnitAt(end) == 40) {
         spans.add(CodeSpan(column: pos, type: TokenType.function_));
         pos = end; continue;
       }
@@ -141,7 +145,6 @@ List<CodeSpan> _tokenizeLine(String line) {
       pos = end; continue;
     }
 
-    // Non-word char: try full rule list (strings, comments, numbers, ops...).
     bool hit = false;
     for (final r in rules) {
       final m = r.re.matchAsPrefix(line, pos);
@@ -194,7 +197,7 @@ List<(int, int, int)> _extractBlocks(List<String> lines) {
     final llen = ln.length;
     for (int j = 0; j < llen; j++) {
       final c = ln.codeUnitAt(j);
-      if (c == 47 && j+1 < llen && ln.codeUnitAt(j+1) == 47) break; // line comment
+      if (c == 47 && j+1 < llen && ln.codeUnitAt(j+1) == 47) break;
       if (!s1 && !s2 && !tpl) {
         if      (c == 39)  s1 = true;
         else if (c == 34)  s2 = true;
@@ -236,89 +239,160 @@ void isolateEntry(SendPort mainPort) {
     if (cmd == 'destroy') { rp.close(); return; }
 
     if (cmd == 'job') {
-      // Rules sent once on first job; stay in module vars for subsequent jobs.
+      final langName  = msg['langName'] as String;
+      final managerId = msg['managerId'] as String;
+
+      // Cache rules for this language the first time they arrive.
       if (msg.containsKey('rules')) {
         final rawR = msg['rules'] as List<dynamic>;
-        _isoRules = rawR.map<_IsoRule>((r) {
+        _langRules[langName] = rawR.map<_IsoRule>((r) {
           final m = r as Map<String, dynamic>;
           return _IsoRule(m['p'] as String, m['t'] as int);
         }).toList();
         final rawW = msg['wordMap'] as Map<dynamic, dynamic>? ?? const {};
-        _isoWordMap = {for (final e in rawW.entries) e.key as String: e.value as int};
+        _langWordMap[langName] = {for (final e in rawW.entries) e.key as String: e.value as int};
       }
+
+      // Load the cached rules for this language.
+      _isoRules   = _langRules[langName]   ?? const [];
+      _isoWordMap = _langWordMap[langName] ?? const {};
+
       final lines   = (msg['lines'] as List<dynamic>).cast<String>();
       final version = msg['version'] as int;
-      _runJob(mainPort, lines, version);
+      _runJob(mainPort, lines, version, managerId);
     }
   });
 }
 
-void _runJob(SendPort out, List<String> lines, int version) {
+void _runJob(SendPort out, List<String> lines, int version, String managerId) {
   final lc  = lines.length;
   final all = List<List<CodeSpan>>.filled(lc, const [], growable: false);
 
   for (int i = 0; i < lc; i++) {
     all[i] = _tokenizeLine(lines[i]);
     if ((i + 1) % _kChunk == 0 && i + 1 < lc) {
-      // Progress pulse — lets editor show partial colors during long analysis.
-      // 'upTo' tells the UI which lines (0..upTo) are freshly tokenised so it
-      // can merge: keep old spans for untouched lines instead of going grey.
       final enc = _encodeSpans(all);
       out.send(<String, dynamic>{
-        'cmd': 'progress', 'version': version, 'upTo': i,
+        'cmd': 'progress', 'managerId': managerId, 'version': version, 'upTo': i,
         'data': TransferableTypedData.fromList(<TypedData>[enc]),
       });
     }
   }
 
-  // Send final spans.
   out.send(<String, dynamic>{
-    'cmd': 'spans', 'version': version,
+    'cmd': 'spans', 'managerId': managerId, 'version': version,
     'data': TransferableTypedData.fromList(<TypedData>[_encodeSpans(all)]),
   });
 
-  // Code-blocks run immediately after tokenisation in the SAME job invocation
-  // so the UI never blocks on either.
   final blocks = _extractBlocks(lines);
   out.send(<String, dynamic>{
-    'cmd': 'blocks', 'version': version,
+    'cmd': 'blocks', 'managerId': managerId, 'version': version,
     'data': TransferableTypedData.fromList(<TypedData>[_encodeBlocks(blocks)]),
   });
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// UI-side wrapper
+// UI-side wrapper — singleton shared by all editor instances
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// [upTo] is the last line index that was freshly tokenised in this batch.
-/// -1 on final delivery (all lines are final).
+/// [upTo] is the last line index freshly tokenised in this batch. -1 on final.
 typedef SpansCallback  = void Function(int version, List<List<CodeSpan>> spans, bool isFinal, int upTo);
 typedef BlocksCallback = void Function(int version, List<CodeBlock> blocks);
 
-/// Long-lived isolate wrapper.  One instance per [IncrementalAnalyzeManager].
-class IsolateTokenizer {
+class _ManagerEntry {
   final SpansCallback  onSpans;
   final BlocksCallback onBlocks;
+  String  langName      = '';
+  List<Map<String, dynamic>>? pendingRules;
+  Map<String, int>?           pendingWordMap;
+  int currentVersion = -1;
 
+  _ManagerEntry({required this.onSpans, required this.onBlocks});
+}
+
+/// Shared single-isolate tokenizer.
+/// All [IncrementalAnalyzeManager] instances register here — exactly ONE
+/// Dart Isolate is spawned regardless of how many files are open.
+class IsolateTokenizer {
+  // ── Singleton ──────────────────────────────────────────────────────────────
+  static final IsolateTokenizer shared = IsolateTokenizer._();
+  IsolateTokenizer._();
+
+  // ── Manager registry ───────────────────────────────────────────────────────
+  final Map<String, _ManagerEntry> _managers  = {};
+  // Language names whose rules have been sent to the isolate.
+  final Set<String>               _sentLangs = {};
+  int _nextId = 0;
+
+  // ── Isolate handles ────────────────────────────────────────────────────────
   Isolate?         _isolate;
   SendPort?        _toIsolate;
   ReceivePort?     _fromIsolate;
-  Completer<void>? _spawnFut;   // serialise concurrent spawn calls
+  Completer<void>? _spawnFut;
 
-  bool _destroyed  = false;
-  bool _rulesSent  = false;
-  int  _currentVer = -1;
+  // ── Registration ───────────────────────────────────────────────────────────
 
-  List<Map<String, dynamic>>? _rulePay;
-  Map<String, int>?           _wordPay;
-
-  IsolateTokenizer({required this.onSpans, required this.onBlocks});
-
-  void setRules(List<Map<String, dynamic>> rules, Map<String, int> wordMap) {
-    _rulePay   = rules;
-    _wordPay   = wordMap;
-    _rulesSent = false;
+  /// Register a new manager. Returns a unique [managerId] to pass to
+  /// [setRules] and [tokenize].
+  String registerManager({
+    required SpansCallback  onSpans,
+    required BlocksCallback onBlocks,
+  }) {
+    final id = (_nextId++).toString();
+    _managers[id] = _ManagerEntry(onSpans: onSpans, onBlocks: onBlocks);
+    return id;
   }
+
+  /// Unregister when the editor is closed. Pending/future messages for this
+  /// manager are silently dropped.
+  void unregisterManager(String managerId) {
+    _managers.remove(managerId);
+  }
+
+  /// Provide language rules for [managerId]. Saved until the first [tokenize]
+  /// call; sent to the isolate only once per unique [langName].
+  void setRules(String managerId, String langName,
+      List<Map<String, dynamic>> rules, Map<String, int> wordMap) {
+    final entry = _managers[managerId];
+    if (entry == null) return;
+    entry.langName = langName;
+    if (!_sentLangs.contains(langName)) {
+      entry.pendingRules   = rules;
+      entry.pendingWordMap = wordMap;
+    }
+  }
+
+  // ── Job dispatch ───────────────────────────────────────────────────────────
+
+  Future<void> tokenize(String managerId, List<String> lines, int version) async {
+    final entry = _managers[managerId];
+    if (entry == null) return;
+    entry.currentVersion = version;
+    await _ensureSpawned();
+    // Re-check after await — manager may have been unregistered.
+    if (_managers[managerId] == null) return;
+
+    final msg = <String, dynamic>{
+      'cmd':       'job',
+      'managerId': managerId,
+      'langName':  entry.langName,
+      'lines':     lines,
+      'version':   version,
+    };
+
+    // Send rules the first time this language appears in the isolate.
+    if (!_sentLangs.contains(entry.langName) && entry.pendingRules != null) {
+      msg['rules']   = entry.pendingRules!;
+      msg['wordMap'] = entry.pendingWordMap ?? const <String, int>{};
+      _sentLangs.add(entry.langName);
+      entry.pendingRules   = null;
+      entry.pendingWordMap = null;
+    }
+
+    _toIsolate!.send(msg);
+  }
+
+  // ── Isolate lifecycle ──────────────────────────────────────────────────────
 
   Future<void> _ensureSpawned() async {
     if (_isolate != null) return;
@@ -332,11 +406,10 @@ class IsolateTokenizer {
     bool ready = false;
 
     rp.listen((dynamic raw) {
-      if (_destroyed) return;
       final msg = raw as Map<String, dynamic>;
       if (!ready) {
-        ready       = true;
-        _toIsolate  = msg['port'] as SendPort;
+        ready      = true;
+        _toIsolate = msg['port'] as SendPort;
         c.complete();
         return;
       }
@@ -352,47 +425,25 @@ class IsolateTokenizer {
     _spawnFut = null;
   }
 
+  // ── Message routing ────────────────────────────────────────────────────────
+
   void _onMsg(Map<String, dynamic> msg) {
-    if (_destroyed) return;
+    final managerId = msg['managerId'] as String;
+    final entry = _managers[managerId];
+    if (entry == null) return; // manager closed — drop
+
     final cmd = msg['cmd'] as String;
     final ver = msg['version'] as int;
-    if (ver != _currentVer) return; // stale — discard
+    if (ver != entry.currentVersion) return; // stale — discard
 
     final td = msg['data'] as TransferableTypedData;
     if (cmd == 'progress') {
       final upTo = msg['upTo'] as int? ?? -1;
-      onSpans(ver, decodeSpans(td.materialize().asUint32List()), false, upTo);
+      entry.onSpans(ver, decodeSpans(td.materialize().asUint32List()), false, upTo);
     } else if (cmd == 'spans') {
-      onSpans(ver, decodeSpans(td.materialize().asUint32List()), true, -1);
+      entry.onSpans(ver, decodeSpans(td.materialize().asUint32List()), true, -1);
     } else if (cmd == 'blocks') {
-      onBlocks(ver, decodeBlocks(td.materialize().asInt32List()));
+      entry.onBlocks(ver, decodeBlocks(td.materialize().asInt32List()));
     }
-  }
-
-  /// Submit a full-tokenisation job (non-blocking).
-  /// If the isolate is busy with an older job, UI will simply discard
-  /// the stale result when it arrives.
-  Future<void> tokenize(List<String> lines, int version) async {
-    if (_destroyed) return;
-    _currentVer = version;
-    await _ensureSpawned();
-    if (_destroyed) return;
-
-    final msg = <String, dynamic>{'cmd': 'job', 'lines': lines, 'version': version};
-    if (!_rulesSent && _rulePay != null) {
-      msg['rules']   = _rulePay!;
-      msg['wordMap'] = _wordPay ?? const <String, int>{};
-      _rulesSent     = true;
-    }
-    _toIsolate!.send(msg);
-  }
-
-  void destroy() {
-    if (_destroyed) return;
-    _destroyed = true;
-    try { _toIsolate?.send(<String, dynamic>{'cmd': 'destroy'}); } catch (_) {}
-    _isolate?.kill(priority: Isolate.immediate);
-    _fromIsolate?.close();
-    _isolate = _toIsolate = _fromIsolate = null;
   }
 }
