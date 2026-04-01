@@ -207,6 +207,9 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   double _gw     = 0;
   static const double _minimapWidth = 80.0; // VSCode-style minimap panel width
 
+  // ── Cursor visibility — hidden until first user tap ──────────────────
+  bool _everActivated = false;
+
   // ── Handle state (mutated directly; drives _handleTick not setState) ──
   String? _drag;
   bool    _cursorHandleVisible = false;
@@ -1153,6 +1156,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   Offset     _lastTapPos = Offset.zero;
 
   void _onTapDown(TapDownDetails d) {
+    _everActivated = true;
     final now   = DateTime.now();
     final loc   = d.localPosition;
 
@@ -2962,8 +2966,9 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
             hOff:             hOff,
             // Don't blink while the cursor handle is visible or being dragged —
             // a pulsing cursor behind a handle is visually confusing.
-            cursorAlpha:      (_focus.hasFocus && !_cursorHandleVisible && _drag != 'cursor')
-                                  ? _blink.value : 1.0,
+            cursorAlpha:      !_everActivated ? 0.0
+                                  : (_focus.hasFocus && !_cursorHandleVisible && _drag != 'cursor')
+                                      ? _blink.value : 1.0,
             showCursor:       !ctrl.props.readOnly && !ctrl.cursor.hasSelection,
             vpSize:           _vpSize,
             vis:              _visibleLines(),
@@ -3995,7 +4000,7 @@ class _EditorViewport extends LeafRenderObjectWidget {
     // ── Git-diff / per-line style backgrounds ────────────────────────────────
     if (_ctrl.styles.lineStyles.isNotEmpty) _paintLineStyles(c, off, cs, sY, sX, fl, ll);
 
-    if (_ctrl.props.highlightCurrentLine && !_ctrl.cursor.hasSelection) {
+    if (_ctrl.props.highlightCurrentLine && !_ctrl.cursor.hasSelection && _alpha > 0.0) {
       final ci = _vi(_ctrl.cursor.line);
       if (ci >= fl && ci <= ll) {
         final style = _ctrl.props.lineHighlightStyle;
@@ -4077,7 +4082,7 @@ class _EditorViewport extends LeafRenderObjectWidget {
     // Cursor is painted last so it always renders on top of text, swatches and
     // gutter — important on Android GPUs where intermediate save/restore layers
     // can cause earlier drawLine calls to composite under subsequent draws.
-    if (_showCursor) {
+    if (_showCursor && _alpha > 0.0) {
       final ci = _vi(_ctrl.cursor.line);
       if (ci >= fl && ci <= ll) _paintCursor(c, off, cs, sY, sX, ci);
     }
