@@ -125,47 +125,36 @@ class QuillNative {
   _OffsetToPosDart?     _offsetToPos;
 
   void _init() {
+    DynamicLibrary lib;
     try {
-      final DynamicLibrary lib = Platform.isAndroid
+      lib = Platform.isAndroid
           ? DynamicLibrary.open('libquill_perf.so')
           : DynamicLibrary.process();
-
-      _extractBlocks = lib.lookupFunction<_ExtractBlocksNative, _ExtractBlocksDart>(
-          'quill_extract_blocks');
-      _extractBlocksFlat = lib.lookupFunction<_ExtractBlocksFlatNative, _ExtractBlocksFlatDart>(
-          'quill_extract_blocks_flat');
-      _search = lib.lookupFunction<_SearchNative, _SearchDart>(
-          'quill_search');
-      _buildLineStarts = lib.lookupFunction<_BuildLineStartsNative, _BuildLineStartsDart>(
-          'quill_build_line_starts');
-      _maxLineLength = lib.lookupFunction<_MaxLineLengthNative, _MaxLineLengthDart>(
-          'quill_max_line_length');
-      _bracketMatch = lib.lookupFunction<_BracketMatchNative, _BracketMatchDart>(
-          'quill_bracket_match');
-      _fulltextJoin = lib.lookupFunction<_FulltextJoinNative, _FulltextJoinDart>(
-          'quill_fulltext_join');
-      _tokenizeLine = lib.lookupFunction<_TokenizeLineNative, _TokenizeLineDart>(
-          'quill_tokenize_line');
-      _symbolScan = lib.lookupFunction<_SymbolScanNative, _SymbolScanDart>(
-          'quill_symbol_scan');
-
-      _hasStructChar = lib.lookupFunction<_HasStructCharNative, _HasStructCharDart>(
-          'quill_has_structural_char');
-      _stripFold = lib.lookupFunction<_StripFoldNative, _StripFoldDart>(
-          'quill_strip_fold_opener');
-      _validateBlocks = lib.lookupFunction<_ValidateBlocksNative, _ValidateBlocksDart>(
-          'quill_validate_blocks');
-      _indentAdvance = lib.lookupFunction<_IndentAdvanceNative, _IndentAdvanceDart>(
-          'quill_indent_advance');
-      _posToOffset = lib.lookupFunction<_PosToOffsetNative, _PosToOffsetDart>(
-          'quill_pos_to_offset');
-      _offsetToPos = lib.lookupFunction<_OffsetToPosNative, _OffsetToPosDart>(
-          'quill_offset_to_pos');
-
-      _available = true;
     } catch (_) {
-      _available = false;
+      return; // library not present — all pointers stay null, _available = false
     }
+
+    // Look up each symbol independently so a missing symbol in an older build
+    // of libquill_perf.so doesn't prevent the other symbols from loading.
+    try { _extractBlocks    = lib.lookupFunction<_ExtractBlocksNative,     _ExtractBlocksDart>    ('quill_extract_blocks');         } catch (_) {}
+    try { _extractBlocksFlat= lib.lookupFunction<_ExtractBlocksFlatNative, _ExtractBlocksFlatDart>('quill_extract_blocks_flat');    } catch (_) {}
+    try { _search           = lib.lookupFunction<_SearchNative,            _SearchDart>           ('quill_search');                 } catch (_) {}
+    try { _buildLineStarts  = lib.lookupFunction<_BuildLineStartsNative,   _BuildLineStartsDart>  ('quill_build_line_starts');      } catch (_) {}
+    try { _maxLineLength    = lib.lookupFunction<_MaxLineLengthNative,     _MaxLineLengthDart>    ('quill_max_line_length');        } catch (_) {}
+    try { _bracketMatch     = lib.lookupFunction<_BracketMatchNative,      _BracketMatchDart>     ('quill_bracket_match');          } catch (_) {}
+    try { _fulltextJoin     = lib.lookupFunction<_FulltextJoinNative,      _FulltextJoinDart>     ('quill_fulltext_join');          } catch (_) {}
+    try { _tokenizeLine     = lib.lookupFunction<_TokenizeLineNative,      _TokenizeLineDart>     ('quill_tokenize_line');          } catch (_) {}
+    try { _symbolScan       = lib.lookupFunction<_SymbolScanNative,        _SymbolScanDart>       ('quill_symbol_scan');            } catch (_) {}
+    try { _hasStructChar    = lib.lookupFunction<_HasStructCharNative,     _HasStructCharDart>    ('quill_has_structural_char');    } catch (_) {}
+    try { _stripFold        = lib.lookupFunction<_StripFoldNative,         _StripFoldDart>        ('quill_strip_fold_opener');      } catch (_) {}
+    try { _validateBlocks   = lib.lookupFunction<_ValidateBlocksNative,    _ValidateBlocksDart>   ('quill_validate_blocks');        } catch (_) {}
+    try { _indentAdvance    = lib.lookupFunction<_IndentAdvanceNative,     _IndentAdvanceDart>    ('quill_indent_advance');         } catch (_) {}
+    try { _posToOffset      = lib.lookupFunction<_PosToOffsetNative,       _PosToOffsetDart>      ('quill_pos_to_offset');          } catch (_) {}
+    try { _offsetToPos      = lib.lookupFunction<_OffsetToPosNative,       _OffsetToPosDart>      ('quill_offset_to_pos');          } catch (_) {}
+
+    // Mark available as long as the library opened. Individual callers already
+    // null-check the specific function pointer they need before calling it.
+    _available = true;
   }
 
   // ── extractBlocks ───────────────────────────────────────────────────────────
