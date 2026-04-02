@@ -2497,7 +2497,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
       left: left, top: top,
       child: IgnorePointer(
         child: RawMagnifier(
-          magnificationScale: magnification,
+          magnificationScale: 1,
           focalPointOffset: offset,
           decoration: MagnifierDecoration(
             shape: RoundedRectangleBorder(
