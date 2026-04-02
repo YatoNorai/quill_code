@@ -1,7 +1,0 @@
-[
-{
-  "directory": "D:/apps/quill_code/android/.cxx/Release/4k2a3v1h/arm64-v8a",
-  "command": "C:\\Users\\mathu\\AppData\\Local\\Android\\Sdk\\ndk\\26.1.10909125\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android21 --sysroot=C:/Users/mathu/AppData/Local/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/windows-x86_64/sysroot -Dquill_perf_EXPORTS -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -std=c11 -O3 -DNDEBUG  -fPIC -fvisibility=hidden -o CMakeFiles\\quill_perf.dir\\quill_perf_stub.c.o -c D:\\apps\\quill_code\\android\\src\\main\\cpp\\quill_perf_stub.c",
-  "file": "D:\\apps\\quill_code\\android\\src\\main\\cpp\\quill_perf_stub.c"
-}
-]

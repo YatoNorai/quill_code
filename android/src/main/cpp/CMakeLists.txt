@@ -41,12 +41,18 @@ add_library(quill_perf SHARED
   "${CMAKE_SOURCE_DIR}/quill_perf_stub.c"
 )
 
+# Keep every Rust symbol in the final .so. Without whole-archive the linker
+# may drop the archive members because the C stub does not reference them
+# directly, which makes FFI lookups fail at runtime.
 target_link_libraries(quill_perf
+  "-Wl,--whole-archive"
   quill_perf_static
+  "-Wl,--no-whole-archive"
   log
 )
 
-target_link_options(quill_perf PRIVATE -Wl,--gc-sections)
+# Keep Rust FFI symbols alive for DynamicLibrary.lookupFunction.
+target_link_options(quill_perf PRIVATE -Wl,--no-gc-sections)
 
 set_target_properties(quill_perf PROPERTIES
   C_VISIBILITY_PRESET   hidden

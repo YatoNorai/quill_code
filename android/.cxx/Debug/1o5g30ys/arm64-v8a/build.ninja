@@ -68,8 +68,8 @@ build CMakeFiles/quill_perf.dir/quill_perf_stub.c.o: C_COMPILER__quill_perf_Debu
 
 build D$:/apps/quill_code/example/build/quill_code/intermediates/cxx/Debug/1o5g30ys/obj/arm64-v8a/libquill_perf.so: C_SHARED_LIBRARY_LINKER__quill_perf_Debug CMakeFiles/quill_perf.dir/quill_perf_stub.c.o | D$:/apps/quill_code/android/src/main/cpp/../rust/target/aarch64-linux-android/release/libquill_perf.a
   LANGUAGE_COMPILE_FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -std=c11 -fno-limit-debug-info
-  LINK_FLAGS = -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments   -Wl,--export-dynamic  -Wl,--gc-sections
-  LINK_LIBRARIES = D:/apps/quill_code/android/src/main/cpp/../rust/target/aarch64-linux-android/release/libquill_perf.a  -llog  -latomic -lm
+  LINK_FLAGS = -Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments   -Wl,--export-dynamic  -Wl,--no-gc-sections
+  LINK_LIBRARIES = -Wl,--whole-archive  D:/apps/quill_code/android/src/main/cpp/../rust/target/aarch64-linux-android/release/libquill_perf.a  -Wl,--no-whole-archive  -llog  -latomic -lm
   OBJECT_DIR = CMakeFiles\quill_perf.dir
   POST_BUILD = cd .
   PRE_LINK = cd .

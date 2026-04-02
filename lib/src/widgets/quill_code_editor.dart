@@ -142,9 +142,18 @@ class QuillCodeEditor extends StatefulWidget {
 class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin implements TextInputClient {
 
   // ── Focus / cursor blink ───────────────────────────────────────────────
+  // [_blinkAlpha] is a dedicated ValueNotifier that carries the cursor opacity.
+  // [_EBox] subscribes to it directly so blink triggers only markNeedsPaint()
+  // on the canvas layer — NOT a full widget rebuild — which prevents the
+  // current-line highlight (and the rest of the content layer) from flickering
+  // in sync with the cursor on every half-cycle.
   late FocusNode           _focus;
   TextInputConnection?     _inputConn;   // Android IME connection for clipboard paste
   late AnimationController _blink;
+  /// Current cursor opacity, updated by [_syncBlinkAlpha].
+  /// [_EBox] subscribes to this directly via [addListener] so blink repaints
+  /// only the canvas without rebuilding the widget tree.
+  final ValueNotifier<double> _blinkAlpha = ValueNotifier(1.0);
 
   // ── Scroll ────────────────────────────────────────────────────────────
   final ScrollController _vCtrl = ScrollController();
@@ -374,7 +383,10 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
         if (!mounted) return;
         if (s == AnimationStatus.completed) _blink.reverse();
         if (s == AnimationStatus.dismissed) _blink.forward();
-      });
+      })
+      // Update _blinkAlpha on every tick so _EBox can repaint the cursor
+      // without going through a full widget rebuild.
+      ..addListener(_syncBlinkAlpha);
     _scrollbarFade = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 200),
@@ -395,7 +407,12 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     _handleListenable     = Listenable.merge([_cursorTick, _handleTick, _zoomN]);
     _toolbarListenable    = Listenable.merge([_toolbarVisible, _zoomN]);
     _magnifierListenable  = Listenable.merge([_handleTick, _cursorTick]);
-    _scrollListenable     = Listenable.merge([widget.controller, _blink, _handleTick]);
+    // _blink is intentionally NOT merged here. Blink ticks update _blinkAlpha
+    // (a ValueNotifier) which _EBox subscribes to directly via addListener.
+    // This prevents the blink from triggering a full ListenableBuilder
+    // rebuild → updateRenderObject cycle, which was causing the current-line
+    // highlight to repaint (and visually flicker) on every blink half-cycle.
+    _scrollListenable     = Listenable.merge([widget.controller, _handleTick]);
     if (widget.autofocus) WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) _showKbd(); });
     // Attach LSP if provided
     if (widget.lspClient != null || widget.lspConfig != null) {
@@ -537,6 +554,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     // ── Step 3: stop & dispose animation/notifiers ──
     _blink.stop();
     _blink.dispose();
+    _blinkAlpha.dispose();
     _scrollbarFade.dispose();
     _cursorTick.dispose();
     _gutterScrollY.dispose();
@@ -729,9 +747,32 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
 
   void _onFocusChange() {
     if (!mounted) return;
-    if (_focus.hasFocus) _blink.forward();
-    else { _blink.stop(); _blink.value = 1.0; widget.controller.hideCompletion(); }
+    if (_focus.hasFocus) {
+      _blink.forward();
+    } else {
+      _blink.stop();
+      _blink.value = 1.0;
+      widget.controller.hideCompletion();
+    }
+    _syncBlinkAlpha();
     _cursorTick.value++;
+  }
+
+  /// Recomputes and pushes the correct cursor opacity into [_blinkAlpha].
+  /// Called by: blink animation listener, focus changes, handle show/hide,
+  /// drag start/end, and first activation. [_EBox] subscribes to [_blinkAlpha]
+  /// directly — no widget rebuild occurs.
+  void _syncBlinkAlpha() {
+    if (!mounted) return;
+    final double alpha;
+    if (!_everActivated) {
+      alpha = 0.0;
+    } else if (_focus.hasFocus && !_cursorHandleVisible && _drag != 'cursor') {
+      alpha = _blink.value;
+    } else {
+      alpha = 1.0;
+    }
+    _blinkAlpha.value = alpha;
   }
 
   void _onCtrl() {
@@ -906,9 +947,10 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     _cursorHandleVisible = true; _selHandlesVisible = false;
     _toolbarVisible.value = false;
     _handleTick.value++;
+    _syncBlinkAlpha(); // cursor handle visible → stop blinking, show solid cursor
     _cursorHandleTimer = Timer(const Duration(seconds: 5), () {
       if (!mounted) return;
-      if (_drag != 'cursor') { _cursorHandleVisible = false; _handleTick.value++; }
+      if (_drag != 'cursor') { _cursorHandleVisible = false; _handleTick.value++; _syncBlinkAlpha(); }
     });
   }
 
@@ -916,6 +958,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     _cursorHandleTimer?.cancel();
     _cursorHandleVisible = false; _selHandlesVisible = true;
     _handleTick.value++;
+    _syncBlinkAlpha();
     _toolbarVisible.value = true;
   }
 
@@ -924,6 +967,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     _cursorHandleVisible = false; _selHandlesVisible = false;
     _toolbarVisible.value = false;
     _handleTick.value++;
+    _syncBlinkAlpha();
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -1157,6 +1201,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
 
   void _onTapDown(TapDownDetails d) {
     _everActivated = true;
+    _syncBlinkAlpha(); // reveal cursor (was hidden until first tap)
     final now   = DateTime.now();
     final loc   = d.localPosition;
 
@@ -1432,6 +1477,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     _drag = 'cursor'; _cursorHandleTimer?.cancel();
     _magnifierPos = _g2l(d.globalPosition);
     _handleTick.value++;
+    _syncBlinkAlpha(); // dragging cursor → hold solid (no blink)
   }
   void _cDragUpdate(DragUpdateDetails d) {
     final local = _g2l(d.globalPosition);
@@ -1443,7 +1489,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   void _cDragEnd(DragEndDetails _) {
     _drag = null; _edgeTimer?.cancel();
     _magnifierPos = null;
-    _showCursorHandle();
+    _showCursorHandle(); // _showCursorHandle already calls _syncBlinkAlpha
   }
 
   void _ssDragStart(DragStartDetails _) => _drag = 'selStart';
@@ -2964,11 +3010,9 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
             gw:               _gw,
             vOff:             vOff,
             hOff:             hOff,
-            // Don't blink while the cursor handle is visible or being dragged —
-            // a pulsing cursor behind a handle is visually confusing.
-            cursorAlpha:      !_everActivated ? 0.0
-                                  : (_focus.hasFocus && !_cursorHandleVisible && _drag != 'cursor')
-                                      ? _blink.value : 1.0,
+            // blinkAlpha is a ValueNotifier owned by State. _EBox subscribes to
+            // it directly so cursor opacity changes never touch the widget tree.
+            blinkAlpha:       _blinkAlpha,
             showCursor:       !ctrl.props.readOnly && !ctrl.cursor.hasSelection,
             vpSize:           _vpSize,
             vis:              _visibleLines(),
@@ -3336,11 +3380,14 @@ class _EditorViewport extends LeafRenderObjectWidget {
   final EditorTheme theme;
   final double gw;
   final ViewportOffset vOff, hOff;
-  final double cursorAlpha;
+  // blinkAlpha replaces the old cursorAlpha double. _EBox subscribes to it
+  // directly so cursor opacity changes trigger markNeedsPaint() only on the
+  // render object — never a full widget-tree rebuild.
+  final ValueNotifier<double> blinkAlpha;
   final bool showCursor;
   final Size vpSize;
   final List<int> vis;
-  final bool visFoldFree; // passed from State._cachedFoldFree — avoids O(n) _isIdentitySeq in _EBox
+  final bool visFoldFree;
   final EditorRange? symbolHighlight;
   final BracketPair?  bracketPair;
   final int           activeBlockDepth;
@@ -3351,9 +3398,9 @@ class _EditorViewport extends LeafRenderObjectWidget {
   final ValueNotifier<double> gutterScrollNotifier;
   final ValueNotifier<int> ghostInsertViNotifier;
   final ValueNotifier<int> ghostExtraRowsNotifier;
-  const _EditorViewport({required this.controller, required this.theme, required this.gw, required this.vOff, required this.hOff, required this.cursorAlpha, required this.showCursor, required this.vpSize, required this.vis, required this.visFoldFree, this.symbolHighlight, this.bracketPair, this.activeBlockDepth = 0, required this.zoomNotifier, required this.gwNotifier, required this.wrapOffsetsNotifier, required this.scrollCtrl, required this.gutterScrollNotifier, required this.ghostInsertViNotifier, required this.ghostExtraRowsNotifier});
+  const _EditorViewport({required this.controller, required this.theme, required this.gw, required this.vOff, required this.hOff, required this.blinkAlpha, required this.showCursor, required this.vpSize, required this.vis, required this.visFoldFree, this.symbolHighlight, this.bracketPair, this.activeBlockDepth = 0, required this.zoomNotifier, required this.gwNotifier, required this.wrapOffsetsNotifier, required this.scrollCtrl, required this.gutterScrollNotifier, required this.ghostInsertViNotifier, required this.ghostExtraRowsNotifier});
   @override
-  _EBox createRenderObject(BuildContext ctx) => _EBox(ctrl: controller, theme: theme, gw: gw, vOff: vOff, hOff: hOff, cursorAlpha: cursorAlpha, showCursor: showCursor, vpSize: vpSize, vis: vis, visFoldFree: visFoldFree, zoomNotifier: zoomNotifier, gwNotifier: gwNotifier, wrapOffsetsNotifier: wrapOffsetsNotifier, scrollCtrl: scrollCtrl, gutterScrollNotifier: gutterScrollNotifier, ghostInsertViNotifier: ghostInsertViNotifier, ghostExtraRowsNotifier: ghostExtraRowsNotifier)
+  _EBox createRenderObject(BuildContext ctx) => _EBox(ctrl: controller, theme: theme, gw: gw, vOff: vOff, hOff: hOff, blinkAlpha: blinkAlpha, showCursor: showCursor, vpSize: vpSize, vis: vis, visFoldFree: visFoldFree, zoomNotifier: zoomNotifier, gwNotifier: gwNotifier, wrapOffsetsNotifier: wrapOffsetsNotifier, scrollCtrl: scrollCtrl, gutterScrollNotifier: gutterScrollNotifier, ghostInsertViNotifier: ghostInsertViNotifier, ghostExtraRowsNotifier: ghostExtraRowsNotifier)
     .._symbolHighlight = symbolHighlight
     .._bracketPair = bracketPair
     .._activeBlockDepth = activeBlockDepth;
@@ -3364,10 +3411,10 @@ class _EditorViewport extends LeafRenderObjectWidget {
     ro.gw              = gw;
     ro.vOff            = vOff;
     ro.hOff            = hOff;
-    ro.cursorAlpha     = cursorAlpha;
+    ro.blinkAlpha      = blinkAlpha;
     ro.showCursor      = showCursor;
     ro.vpSize          = vpSize;
-    ro.setVis(vis, visFoldFree); // atomic: sets vis + visFoldFree, skips _isIdentitySeq O(n)
+    ro.setVis(vis, visFoldFree);
     ro.symbolHighlight = symbolHighlight;
     ro.bracketPair     = bracketPair;
     ro.activeBlockDepth = activeBlockDepth;
@@ -3395,7 +3442,11 @@ class _EditorViewport extends LeafRenderObjectWidget {
 // ═══════════════════════════════════════════════════════════════════════════
   class _EBox extends RenderBox {
   QuillCodeController _ctrl; EditorTheme _theme; double _gw;
-  ViewportOffset _vOff, _hOff; double _alpha; bool _showCursor; Size _vpSize; List<int> _vis;
+  ViewportOffset _vOff, _hOff;
+  /// Blink-alpha notifier received from State. Subscribed via addListener so
+  /// cursor opacity changes call markNeedsPaint() directly — no widget rebuild.
+  ValueNotifier<double> _blinkNotifier;
+  bool _showCursor; Size _vpSize; List<int> _vis;
   Map<int, int> _visIdx = {}; // O(1) doc-line → vis-index reverse lookup (folds only)
   /// True when vis is the identity sequence [0..n-1] (no active folds).
   /// When true, _vi(line) == line — no HashMap lookup needed.
@@ -3588,7 +3639,7 @@ class _EditorViewport extends LeafRenderObjectWidget {
     required double gw,
     required ViewportOffset vOff,
     required ViewportOffset hOff,
-    required double cursorAlpha,
+    required ValueNotifier<double> blinkAlpha,
     required bool showCursor,
     required Size vpSize,
     required List<int> vis,
@@ -3601,19 +3652,21 @@ class _EditorViewport extends LeafRenderObjectWidget {
     ValueNotifier<int>? ghostInsertViNotifier,
     ValueNotifier<int>? ghostExtraRowsNotifier,
   }) : _ctrl = ctrl, _theme = theme, _gw = gw,
-       _vOff = vOff, _hOff = hOff, _alpha = cursorAlpha,
+       _vOff = vOff, _hOff = hOff, _blinkNotifier = blinkAlpha,
        _showCursor = showCursor, _vpSize = vpSize, _vis = vis,
        _visFoldFree = visFoldFree,
        _zoomNotifier = zoomNotifier, _gwNotifier = gwNotifier,
        _wrapOffsetsNotifier = wrapOffsetsNotifier,
        _scrollCtrl = scrollCtrl {
-    // Build reverse-lookup map only when folds are active.
     _visIdx = visFoldFree ? const {} : { for (int i = 0; i < vis.length; i++) vis[i]: i };
     _gutterScrollNotifier     = gutterScrollNotifier;
     _ghostInsertViNotifier    = ghostInsertViNotifier;
     _ghostExtraRowsNotifier   = ghostExtraRowsNotifier;
     _vOff.addListener(markNeedsPaint);
     _hOff.addListener(markNeedsPaint);
+    // Blink alpha: subscribed here so cursor opacity changes go straight to
+    // markNeedsPaint() with zero widget overhead.
+    _blinkNotifier.addListener(markNeedsPaint);
     // Content listener MUST be registered before the controller listener so
     // _onContentChange runs (and records the dirty vis-index) before _dirty()
     // is called (which schedules the layout).
@@ -3774,7 +3827,14 @@ class _EditorViewport extends LeafRenderObjectWidget {
   set gw(double v)                { if (_gw == v) return; _gw = v; markNeedsLayout(); }
   set vOff(ViewportOffset v)      { if (_vOff == v) return; _vOff.removeListener(markNeedsPaint); _vOff = v; _vOff.addListener(markNeedsPaint); markNeedsPaint(); }
   set hOff(ViewportOffset v)      { if (_hOff == v) return; _hOff.removeListener(markNeedsPaint); _hOff = v; _hOff.addListener(markNeedsPaint); markNeedsPaint(); }
-  set cursorAlpha(double v)       { if (_alpha == v) return; _alpha = v; markNeedsPaint(); }
+  set cursorAlpha(double v)       { /* replaced by blinkAlpha — no-op kept for safety */ }
+  set blinkAlpha(ValueNotifier<double> v) {
+    if (identical(_blinkNotifier, v)) return;
+    _blinkNotifier.removeListener(markNeedsPaint);
+    _blinkNotifier = v;
+    _blinkNotifier.addListener(markNeedsPaint);
+    markNeedsPaint();
+  }
   set symbolHighlight(EditorRange? v) { if (_symbolHighlight == v) return; _symbolHighlight = v; markNeedsPaint(); }
   set bracketPair(BracketPair? v) {
     if (_bracketPair?.open == v?.open && _bracketPair?.close == v?.close) return;
@@ -3980,7 +4040,8 @@ class _EditorViewport extends LeafRenderObjectWidget {
   void paint(PaintingContext ctx, Offset off) {
     final c  = ctx.canvas; final cs = _theme.colorScheme;
     final sY = _vOff.pixels; final sX = _hOff.pixels;
-    _rebuildCachedColors(cs, _alpha);
+    // Read the live blink opacity directly from the notifier — no _alpha field.
+    _rebuildCachedColors(cs, _blinkNotifier.value);
     final vc = _vis.length;
     if (vc == 0) { _pBg.color = cs.background; c.drawRect(off & size, _pBg); return; }
 
@@ -4000,7 +4061,7 @@ class _EditorViewport extends LeafRenderObjectWidget {
     // ── Git-diff / per-line style backgrounds ────────────────────────────────
     if (_ctrl.styles.lineStyles.isNotEmpty) _paintLineStyles(c, off, cs, sY, sX, fl, ll);
 
-    if (_ctrl.props.highlightCurrentLine && !_ctrl.cursor.hasSelection && _alpha > 0.0) {
+    if (_ctrl.props.highlightCurrentLine && !_ctrl.cursor.hasSelection) {
       final ci = _vi(_ctrl.cursor.line);
       if (ci >= fl && ci <= ll) {
         final style = _ctrl.props.lineHighlightStyle;
@@ -4082,7 +4143,7 @@ class _EditorViewport extends LeafRenderObjectWidget {
     // Cursor is painted last so it always renders on top of text, swatches and
     // gutter — important on Android GPUs where intermediate save/restore layers
     // can cause earlier drawLine calls to composite under subsequent draws.
-    if (_showCursor && _alpha > 0.0) {
+    if (_showCursor && _blinkNotifier.value > 0.0) {
       final ci = _vi(_ctrl.cursor.line);
       if (ci >= fl && ci <= ll) _paintCursor(c, off, cs, sY, sX, ci);
     }
@@ -4238,15 +4299,7 @@ class _EditorViewport extends LeafRenderObjectWidget {
     final folded = _ctrl.isFolded(line);
     var   txt    = _ctrl.content.getLineText(line);
     if (txt.isEmpty && !folded) return;
-    final key = _LCK(line, _ctrl.content.documentVersion, folded);
-    var tp = _lc.remove(key); // LRU: remove first, reinsert as MRU below
-    if (tp == null) {
-      tp = _ctrl.props.wordWrap
-          ? _buildTpWrap(txt, folded, _ctrl.styles.spansForLine(folded ? -1 : line), cs, _codeWidth)
-          : _buildTp(txt, folded, _ctrl.styles.spansForLine(folded ? -1 : line), cs);
-      if (_lc.length >= _lcMax) { final fk = _lc.keys.first; _lc[fk]?.dispose(); _lc.remove(fk); }
-    }
-    _lc[key] = tp; // (re)insert as most-recently-used
+    final tp = _linePainterFor(line, folded, cs);
     final rowTop = off.dy + _rowY(vi) - sY;
     // In word-wrap mode paint at gutter edge (no sX offset — no horiz scroll)
     final textX = _ctrl.props.wordWrap
@@ -4899,6 +4952,34 @@ class _EditorViewport extends LeafRenderObjectWidget {
         () => ColorDetector.detect(_ctrl.content.getLineText(line)));
   }
 
+  TextPainter _linePainterFor(int line, bool folded, EditorColorScheme cs) {
+    final key = _LCK(line, _ctrl.content.documentVersion, folded);
+    var tp = _lc.remove(key);
+    if (tp == null) {
+      tp = _ctrl.props.wordWrap
+          ? _buildTpWrap(
+              _ctrl.content.getLineText(line),
+              folded,
+              _ctrl.styles.spansForLine(folded ? -1 : line),
+              cs,
+              _codeWidth,
+            )
+          : _buildTp(
+              _ctrl.content.getLineText(line),
+              folded,
+              _ctrl.styles.spansForLine(folded ? -1 : line),
+              cs,
+            );
+      if (_lc.length >= _lcMax) {
+        final fk = _lc.keys.first;
+        _lc[fk]?.dispose();
+        _lc.remove(fk);
+      }
+    }
+    _lc[key] = tp;
+    return tp;
+  }
+
   void _paintColorDecorators(Canvas c, Offset off, double sY, double sX, int fl, int ll) {
     if (!_ctrl.props.showColorDecorators) return;
     final fill   = Paint()..style = PaintingStyle.fill;
@@ -4926,8 +5007,19 @@ class _EditorViewport extends LeafRenderObjectWidget {
   }
 
   void _paintCursor(Canvas c, Offset off, EditorColorScheme cs, double sY, double sX, int vi) {
-    final x = off.dx + _gw + _codePad + _ctrl.cursor.column * cw - sX;
-    final y = off.dy + _rowY(vi) - sY;
+    final line = _ctrl.cursor.line;
+    final folded = _ctrl.isFolded(line);
+    final tp = _linePainterFor(line, folded, cs);
+    final txt = _ctrl.content.getLineText(line);
+    final col = _ctrl.cursor.column.clamp(0, txt.length);
+    final caret = tp.getOffsetForCaret(
+      TextPosition(offset: col),
+      Rect.fromLTWH(0, 0, _theme.cursorWidth, _rowH(vi)),
+    );
+
+    final x = off.dx + _gw + _codePad + caret.dx - sX;
+   // final y = off.dy + _rowY(vi) - sY + caret.dy;
+   final y = off.dy + _rowY(vi) - sY; // ignora caret.dy: varia com métricas do TextPainter
     _pCursor.color       = _cachedCursorColor;
     _pCursor.strokeWidth = _theme.cursorWidth;
     c.drawLine(Offset(x, y + 1), Offset(x, y + _rowH(vi) - 1), _pCursor);
@@ -5116,6 +5208,7 @@ class _EditorViewport extends LeafRenderObjectWidget {
   @override
   void dispose() {
     _vOff.removeListener(markNeedsPaint); _hOff.removeListener(markNeedsPaint);
+    _blinkNotifier.removeListener(markNeedsPaint);
     _ctrl.content.removeListener(_onContentChange);
     _ctrl.removeListener(_dirty);
     _ctrl.decorVersion.removeListener(markNeedsPaint);
