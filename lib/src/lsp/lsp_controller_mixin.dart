@@ -29,6 +29,8 @@ class LspBinding {
   void Function(String message)? onError;
 
   Timer?  _diagTimer;
+  Timer?  _changeTimer;
+  String? _pendingText;
   bool    _opened = false;
   int     _version = 0;
 
@@ -49,15 +51,35 @@ class LspBinding {
 
   Future<void> change(String text) async {
     if (!_opened) return;
+    // Debounce didChange at 150 ms — sends only the latest text after typing
+    // pauses, preventing full-document re-sync on every keystroke (critical
+    // on mobile where stdin pipe writes are expensive).
+    _pendingText = text;
+    _changeTimer?.cancel();
+    _changeTimer = Timer(const Duration(milliseconds: 150), () async {
+      if (!_opened || _pendingText == null) return;
+      _version++;
+      await client.didChange(uri: uri, text: _pendingText!, version: _version);
+      _pendingText = null;
+      _diagTimer?.cancel();
+      _diagTimer = Timer(const Duration(milliseconds: 200), _pollDiagnostics);
+    });
+  }
+
+  /// Flush any pending debounced change immediately.
+  /// Must be called before completion/hover/definition requests so the server
+  /// always sees the latest document state.
+  Future<void> _flushPendingChange() async {
+    if (_pendingText == null) return;
+    _changeTimer?.cancel();
+    _changeTimer = null;
     _version++;
-    await client.didChange(uri: uri, text: text, version: _version);
-    // Monaco-style: debounce 500ms after edit, not a fixed 2s periodic poll.
-    // This means the first diagnostic response comes fast after typing stops.
-    _diagTimer?.cancel();
-    _diagTimer = Timer(const Duration(milliseconds: 500), _pollDiagnostics);
+    await client.didChange(uri: uri, text: _pendingText!, version: _version);
+    _pendingText = null;
   }
 
   Future<void> close() async {
+    _changeTimer?.cancel();
     _diagTimer?.cancel();
     if (_opened) await client.didClose(uri: uri);
     _opened = false;
@@ -68,6 +90,8 @@ class LspBinding {
   Future<List<CompletionItem>> completionsAt(CharPosition pos,
       {String? triggerCharacter}) async {
     if (!_opened) return [];
+    // Ensure the server has the latest document before requesting completions.
+    await _flushPendingChange();
     try {
       final results = await client.completion(
           uri: uri, position: pos, triggerCharacter: triggerCharacter);
@@ -136,6 +160,7 @@ class LspBinding {
 
   Future<LspHover?> hoverAt(CharPosition pos) async {
     if (!_opened) return null;
+    await _flushPendingChange();
     try { return await client.hover(uri: uri, position: pos); }
     catch (_) { return null; }
   }
@@ -144,6 +169,7 @@ class LspBinding {
 
   Future<LspSignatureHelp?> signatureHelpAt(CharPosition pos, {String? triggerChar}) async {
     if (!_opened) return null;
+    await _flushPendingChange();
     try {
       return await client.signatureHelp(
         uri: uri, position: pos, triggerCharacter: triggerChar);
@@ -154,6 +180,7 @@ class LspBinding {
 
   Future<List<LspLocation>> definitionAt(CharPosition pos) async {
     if (!_opened) return [];
+    await _flushPendingChange();
     try { return await client.definition(uri: uri, position: pos); }
     catch (_) { return []; }
   }

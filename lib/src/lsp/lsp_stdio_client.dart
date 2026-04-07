@@ -30,7 +30,8 @@ class LspStdioClient implements LspClient {
   final Map<String, String>? environment;
 
   late final Process _process;
-  final _buffer   = <int>[];
+  final _buffer      = <int>[];
+  int   _scanFrom    = 0; // avoid re-scanning already-checked bytes in _findHeaderEnd
   final _pending  = <int, Completer<Map<String, dynamic>>>{};
   final _diagCtrl = StreamController<Map<String, dynamic>>.broadcast();
   int  _nextId    = 1;
@@ -95,14 +96,17 @@ class LspStdioClient implements LspClient {
     while (true) {
       final sep = _findHeaderEnd();
       if (sep == -1) return;
-      final header = utf8.decode(_buffer.sublist(0, sep));
-      final match  = RegExp(r'Content-Length:\s*(\d+)').firstMatch(header);
-      if (match == null) { _buffer.clear(); return; }
-      final length = int.parse(match.group(1)!);
+      // Extract Content-Length without allocating a full sublist — scan the
+      // header bytes directly for the numeric value.
+      final headerStr = utf8.decode(_buffer.sublist(0, sep));
+      final match = _clRx.firstMatch(headerStr);
+      if (match == null) { _buffer.clear(); _scanFrom = 0; return; }
+      final length   = int.parse(match.group(1)!);
       final msgStart = sep + 4; // past \r\n\r\n
       if (_buffer.length < msgStart + length) return;
       final body = _buffer.sublist(msgStart, msgStart + length);
       _buffer.removeRange(0, msgStart + length);
+      _scanFrom = 0; // reset scan pointer after consuming a message
       try {
         _onMessage(jsonDecode(utf8.decode(body)) as Map<String, dynamic>);
       } catch (e) {
@@ -112,11 +116,22 @@ class LspStdioClient implements LspClient {
     }
   }
 
+  // Compiled once — avoids per-call RegExp allocation.
+  static final _clRx = RegExp(r'Content-Length:\s*(\d+)');
+
   int _findHeaderEnd() {
-    for (int i = 0; i <= _buffer.length - 4; i++) {
+    // Start from _scanFrom (max 3 back for the partial-match boundary) so we
+    // never re-scan bytes that were already checked in a previous _onData call.
+    final start = _scanFrom > 3 ? _scanFrom - 3 : 0;
+    for (int i = start; i <= _buffer.length - 4; i++) {
       if (_buffer[i]   == 13 && _buffer[i+1] == 10 &&
-          _buffer[i+2] == 13 && _buffer[i+3] == 10) return i;
+          _buffer[i+2] == 13 && _buffer[i+3] == 10) {
+        _scanFrom = i + 4;
+        return i;
+      }
     }
+    // Remember how far we scanned so the next call continues from here.
+    _scanFrom = _buffer.length > 3 ? _buffer.length - 3 : 0;
     return -1;
   }
 
@@ -143,26 +158,32 @@ class LspStdioClient implements LspClient {
     final id        = _nextId++;
     final completer = Completer<Map<String, dynamic>>();
     _pending[id]    = completer;
-    await _write({'jsonrpc': '2.0', 'id': id, 'method': method, 'params': params});
+    // Requests need a flush so the server receives the data before we await
+    // the response. Notifications skip flush (fire-and-forget).
+    await _write({'jsonrpc': '2.0', 'id': id, 'method': method, 'params': params},
+        flush: true);
     return completer.future.timeout(
-      const Duration(seconds: 10),
+      const Duration(seconds: 5),
       onTimeout: () { _pending.remove(id); return {}; },
     );
   }
 
   Future<void> _sendNotification(String method, Map<String, dynamic> params) {
-    return _write({'jsonrpc': '2.0', 'method': method, 'params': params});
+    // No flush — fire-and-forget. The OS pipe buffer drains between event-loop
+    // turns, so the data reaches the LSP server without an explicit flush.
+    return _write({'jsonrpc': '2.0', 'method': method, 'params': params},
+        flush: false);
   }
 
   // Serialises all writes through a queue so concurrent callers never race
-  // on stdin — IOSink.flush() binds the sink via addStream() internally and
-  // throws "StreamSink is bound to a stream" if add() is called mid-flush.
-  Future<void> _write(Map<String, dynamic> msg) {
+  // on stdin. [flush] should be true only for requests (where we await a
+  // response) — notifications use flush:false to avoid IOSink overhead.
+  Future<void> _write(Map<String, dynamic> msg, {bool flush = false}) {
     return _writeQueue = _writeQueue.then((_) async {
       final body   = utf8.encode(jsonEncode(msg));
       final header = utf8.encode('Content-Length: ${body.length}\r\n\r\n');
       _process.stdin.add([...header, ...body]);
-      await _process.stdin.flush();
+      if (flush) await _process.stdin.flush();
     }).catchError((e) {
       debugPrint('[LSP] write error: $e');
       onError?.call('LSP write error: $e');

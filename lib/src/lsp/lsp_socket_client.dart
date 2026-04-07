@@ -72,7 +72,7 @@ class LspSocketClient implements LspClient {
     final c  = Completer<Map<String, dynamic>>();
     _pending[id] = c;
     _ws?.add(jsonEncode({'jsonrpc': '2.0', 'id': id, 'method': method, 'params': params}));
-    return c.future.timeout(const Duration(seconds: 10), onTimeout: () { _pending.remove(id); return {}; });
+    return c.future.timeout(const Duration(seconds: 5), onTimeout: () { _pending.remove(id); return {}; });
   }
 
   void _not(String method, Map<String, dynamic> params) =>
