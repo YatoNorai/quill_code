@@ -103,9 +103,13 @@ class LspSocketClient implements LspClient {
     _not('textDocument/didClose', {'textDocument': {'uri': uri}});
   }
 
-  @override Future<List<LspCompletionResult>> completion({required String uri, required CharPosition position}) async {
+  @override Future<List<LspCompletionResult>> completion({required String uri, required CharPosition position, String? triggerCharacter}) async {
     if (!_ready) return [];
-    final r = await _req('textDocument/completion', {'textDocument': {'uri': uri}, 'position': _p(position)});
+    final params = <String, dynamic>{'textDocument': {'uri': uri}, 'position': _p(position)};
+    if (triggerCharacter != null) {
+      params['context'] = {'triggerKind': 2, 'triggerCharacter': triggerCharacter};
+    }
+    final r = await _req('textDocument/completion', params);
     return _items(r['result']).map(_comp).toList();
   }
   @override Future<LspHover?> hover({required String uri, required CharPosition position}) async {
@@ -287,8 +291,16 @@ class LspSocketClient implements LspClient {
   LspCompletionResult _comp(Map it) {
     String? doc; final d = it['documentation'];
     if (d is String) doc = d; else if (d is Map) doc = d['value'] as String?;
-    return LspCompletionResult(label: it['label'] as String? ?? '', insertText: it['insertText'] as String? ?? it['label'] as String? ?? '',
-      detail: it['detail'] as String?, documentation: doc, kind: _kind(it['kind'] as int? ?? 1), isSnippet: (it['insertTextFormat'] as int? ?? 1) == 2);
+    return LspCompletionResult(
+      label:       it['label'] as String? ?? '',
+      insertText:  it['insertText'] as String? ?? it['label'] as String? ?? '',
+      filterText:  it['filterText'] as String?,
+      sortText:    it['sortText'] as String?,
+      detail:      it['detail'] as String?,
+      documentation: doc,
+      kind:        _kind(it['kind'] as int? ?? 1),
+      isSnippet:   (it['insertTextFormat'] as int? ?? 1) == 2,
+    );
   }
   LspCompletionKind _kind(int k) {
     const m = {1:LspCompletionKind.text,2:LspCompletionKind.method,3:LspCompletionKind.function_,4:LspCompletionKind.constructor,

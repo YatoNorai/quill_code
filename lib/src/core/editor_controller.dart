@@ -94,12 +94,19 @@ class QuillCodeController extends ChangeNotifier {
   bool                       _completionLoading = false; // true while LSP request in-flight
   String                     _completionPrefix  = '';
   int                        _completionRequestId = 0;  // cancellation token
+  String?                    _completionTrigger;        // last trigger char ('.', '(', ',')
 
   final Set<int> _foldedBlocks = {};
   final Set<int> _breakpoints  = {};
 
   // Debounce for completion
   Timer? _completionDebounce;
+
+  // Characters that trigger LSP member/parameter completion even with empty prefix.
+  static const _triggerChars = {'.', '(', ','};
+
+  String? _getTriggerChar(String inserted) =>
+      inserted.length == 1 && _triggerChars.contains(inserted) ? inserted : null;
 
   // ── Multi-replace mode (Select All Occurrences) ──────────────────────────
   bool               _multiReplaceMode    = false;
@@ -307,7 +314,7 @@ class QuillCodeController extends ChangeNotifier {
     }
     _handleSymbolPair(text);
     _triggerGhostText();
-    _scheduleCompletion();
+    _scheduleCompletion(trigger: _getTriggerChar(text));
     _bumpContent();
     _bumpCursor();
     notifyListeners();
@@ -515,22 +522,7 @@ class QuillCodeController extends ChangeNotifier {
       languageId: languageId ?? _language.name.toLowerCase(),
     );
     _lspBinding!.onDiagnostics = setDiagnostics;
-    _lspBinding!.onCompletionItems = (items) {
-      // Merge LSP completions with local completions
-      if (items.isNotEmpty) {
-        // Avoid creating two intermediate lists before spreading.
-        final merged = List<CompletionItem>.of(items);
-        int local = 0;
-        for (final it in _completionItems) {
-          if (local++ >= 5) break;
-          merged.add(it);
-        }
-        _completionItems = merged;
-        _completionVisible = _completionItems.isNotEmpty;
-        _bumpCompletion();
-        notifyListeners();
-      }
-    };
+    _lspBinding!.onCompletionItems = (_) {}; // pull-based via _doCompletion; no-op here
     _lspBinding!.onNotify = notifyListeners;
     _lspBinding!.onError  = onLspError;
     await _lspBinding!.open(text);
@@ -1063,8 +1055,9 @@ class QuillCodeController extends ChangeNotifier {
   }
 
   // ── Completion ─────────────────────────────────────────────────────────
-  void _scheduleCompletion() {
+  void _scheduleCompletion({String? trigger}) {
     if (!_props.autoCompletion) return;
+    _completionTrigger = trigger;
     _completionDebounce?.cancel();
     _completionDebounce = Timer(const Duration(milliseconds: 60), _doCompletion);
   }
@@ -1073,7 +1066,18 @@ class QuillCodeController extends ChangeNotifier {
     if (!_props.autoCompletion) return;
     final pos = _cursor.position;
     final prefix = _getWordPrefix(pos);
-    if (prefix.isEmpty) { hideCompletion(); return; }
+    // triggerChar is set when user typed '.', '(', or ',' — drives LSP even
+    // when the word prefix is empty (member access / parameter completion).
+    final triggerChar = _completionTrigger;
+    _completionTrigger = null;
+
+    final hasLsp = _lspBinding != null;
+
+    // No prefix AND no trigger AND no LSP → nothing to show.
+    if (prefix.isEmpty && triggerChar == null) { hideCompletion(); return; }
+    // No prefix, trigger char but no LSP → local completions can't help either.
+    if (prefix.isEmpty && !hasLsp) { hideCompletion(); return; }
+
     _completionPrefix = prefix;
 
     // ── Cancellation token ─────────────────────────────────────────────────
@@ -1085,25 +1089,34 @@ class QuillCodeController extends ChangeNotifier {
     bool stale() => myId != _completionRequestId;
 
     // ── Phase 1: Show local items immediately (Sora-style streaming) ───────
-    // The publisher collects items synchronously from language plugins, then
-    // we show them right away — the list appears in the same frame as typing.
+    // Skip local phase for trigger-char completions (e.g. after '.') because
+    // language plugins don't know about object members — only the LSP does.
     final publisher = CompletionPublisher();
-    _language.getCompletions(_content, pos, publisher).then((_) {
-      if (stale()) return;
-      final localItems = _filterAndSort(publisher.items, prefix);
-      _completionItems   = localItems;
-      _completionVisible = localItems.isNotEmpty;
-      _completionLoading = _lspBinding != null; // LSP still in-flight
+    if (prefix.isNotEmpty) {
+      _language.getCompletions(_content, pos, publisher).then((_) {
+        if (stale()) return;
+        final localItems = _filterAndSort(publisher.items, prefix);
+        _completionItems   = localItems;
+        _completionVisible = localItems.isNotEmpty || hasLsp;
+        _completionLoading = hasLsp; // LSP still in-flight
+        _bumpCompletion();
+        notifyListeners();
+      }).catchError((_) {});
+    } else {
+      // Trigger-char case: show loading indicator immediately while LSP loads.
+      _completionItems   = [];
+      _completionVisible = true;
+      _completionLoading = true;
       _bumpCompletion();
       notifyListeners();
-    }).catchError((_) {});
+    }
 
     // ── Phase 2: LSP items arrive later, merge in ──────────────────────────
     // Monaco does the same: show the list immediately, then update it when
     // the server responds. The user already sees results from Phase 1.
-    if (_lspBinding != null) {
+    if (hasLsp) {
       _completionLoading = true;
-      _lspBinding!.completionsAt(pos).then((lspItems) {
+      _lspBinding!.completionsAt(pos, triggerCharacter: triggerChar).then((lspItems) {
         if (stale()) return;
         _completionLoading = false;
         if (publisher.isCancelled) return;
@@ -1114,13 +1127,18 @@ class QuillCodeController extends ChangeNotifier {
         for (final item in [...lspItems, ...publisher.items]) {
           if (seenLabels.add(item.label)) merged.add(item);
         }
-        _completionItems   = _filterAndSort(merged, prefix);
+        // For trigger-char completions, LSP already pre-filtered items for the
+        // position; don't apply startsWith filter (prefix is empty).
+        _completionItems   = prefix.isEmpty
+            ? (_sortItems(merged))
+            : _filterAndSort(merged, prefix);
         _completionVisible = _completionItems.isNotEmpty;
         _bumpCompletion();
         notifyListeners();
       }).catchError((_) {
         if (!stale()) {
           _completionLoading = false;
+          _completionVisible = _completionItems.isNotEmpty;
           _bumpCompletion();
           notifyListeners();
         }
@@ -1135,6 +1153,9 @@ class QuillCodeController extends ChangeNotifier {
         .toList()
       ..sort((a, b) => a.effectiveSortText.compareTo(b.effectiveSortText));
   }
+
+  List<CompletionItem> _sortItems(List<CompletionItem> items) =>
+      items..sort((a, b) => a.effectiveSortText.compareTo(b.effectiveSortText));
 
   /// Trigger LSP lazy-resolve for a selected item's documentation/detail.
   /// Called by the UI when the user highlights an item in the popup.
@@ -1168,6 +1189,7 @@ class QuillCodeController extends ChangeNotifier {
     _completionVisible = false;
     _completionLoading = false;
     _completionItems   = [];
+    _completionTrigger = null;
     ++_completionRequestId; // invalidate any in-flight LSP request
     _completionDebounce?.cancel();
     _bumpCompletion();

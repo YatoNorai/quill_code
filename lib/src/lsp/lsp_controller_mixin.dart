@@ -65,16 +65,20 @@ class LspBinding {
 
   // ── Completions ────────────────────────────────────────────────────────────
 
-  Future<List<CompletionItem>> completionsAt(CharPosition pos) async {
+  Future<List<CompletionItem>> completionsAt(CharPosition pos,
+      {String? triggerCharacter}) async {
     if (!_opened) return [];
     try {
-      final results = await client.completion(uri: uri, position: pos);
+      final results = await client.completion(
+          uri: uri, position: pos, triggerCharacter: triggerCharacter);
       return results.map((r) {
         final kind = _mapKind(r.kind);
         return CompletionItem(
           label:         r.label,
           kind:          kind,
           insertText:    r.insertText ?? r.label,
+          filterText:    r.filterText,
+          sortText:      r.sortText,
           detail:        r.detail,
           documentation: r.documentation,
           isSnippet:     r.isSnippet,

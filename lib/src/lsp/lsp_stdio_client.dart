@@ -240,12 +240,21 @@ class LspStdioClient implements LspClient {
   Future<List<LspCompletionResult>> completion({
     required String uri,
     required CharPosition position,
+    String? triggerCharacter,
   }) async {
     if (!_ready) return [];
-    final resp = await _sendRequest('textDocument/completion', {
+    final params = <String, dynamic>{
       'textDocument': {'uri': uri},
       'position': {'line': position.line, 'character': position.column},
-    });
+    };
+    if (triggerCharacter != null) {
+      params['context'] = {
+        'triggerKind': 2,           // TriggerCharacter
+        'triggerCharacter': triggerCharacter,
+        'isRetrigger': false,
+      };
+    }
+    final resp = await _sendRequest('textDocument/completion', params);
     final items = _extractItems(resp['result']);
     return items.map(_parseCompletion).toList();
   }
@@ -625,6 +634,8 @@ class LspStdioClient implements LspClient {
     return LspCompletionResult(
       label:         item['label'] as String? ?? '',
       insertText:    insertText,
+      filterText:    item['filterText'] as String?,
+      sortText:      item['sortText'] as String?,
       detail:        item['detail'] as String?,
       documentation: doc,
       kind:          kind,

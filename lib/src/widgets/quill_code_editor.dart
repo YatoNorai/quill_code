@@ -478,6 +478,25 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
       // When the controller itself is swapped (e.g. user creates new controller
       // per file), treat it exactly like setText(): reset scroll + gutter.
       _onScrollReset();
+      // Re-attach LSP to new controller/file: reuse the existing client so we
+      // don't spawn a second LSP process. Send didClose for old file, didOpen
+      // for new file — the server tracks both but only one is "active".
+      final existingClient = old.controller.lsp?.client;
+      if (existingClient != null) {
+        final oldCtrl = old.controller;
+        WidgetsBinding.instance.addPostFrameCallback((_) async {
+          if (!mounted) return;
+          await oldCtrl.detachLsp();           // didClose for old URI
+          if (!mounted) return;
+          final langId = widget.lspConfig?.languageId
+              ?? widget.controller.language.name;
+          await widget.controller.attachLsp(  // didOpen for new URI
+            existingClient,
+            uri:        widget.fileUri ?? 'file:///untitled.$langId',
+            languageId: langId,
+          );
+        });
+      }
     }
     // If lspConfig changed (e.g. SSH LSP starts after the editor is built),
     // attach the new LSP client without recreating the whole widget.

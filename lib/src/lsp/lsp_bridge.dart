@@ -21,6 +21,8 @@ enum LspCompletionKind {
 class LspCompletionResult {
   final String label;
   final String? insertText;
+  final String? filterText;
+  final String? sortText;
   final String? detail;
   final String? documentation;
   final LspCompletionKind kind;
@@ -29,6 +31,8 @@ class LspCompletionResult {
   const LspCompletionResult({
     required this.label,
     this.insertText,
+    this.filterText,
+    this.sortText,
     this.detail,
     this.documentation,
     this.kind = LspCompletionKind.text,
@@ -173,9 +177,12 @@ abstract class LspClient {
   Future<void> didClose({required String uri});
 
   /// Completion at cursor position.
+  /// [triggerCharacter] is `.`, `(`, `,`, etc. for trigger-based completion;
+  /// null for word-prefix–based invocation.
   Future<List<LspCompletionResult>> completion({
     required String uri,
     required CharPosition position,
+    String? triggerCharacter,
   });
 
   /// Hover information at position.
@@ -277,7 +284,7 @@ class NullLspClient implements LspClient {
   @override Future<void>   didOpen({required uri, required languageId, required text, required version}) async {}
   @override Future<void>   didChange({required uri, required text, required version}) async {}
   @override Future<void>   didClose({required uri}) async {}
-  @override Future<List<LspCompletionResult>> completion({required uri, required position}) async => [];
+  @override Future<List<LspCompletionResult>> completion({required uri, required position, triggerCharacter}) async => [];
   @override Future<LspHover?> hover({required uri, required position}) async => null;
   @override Future<LspSignatureHelp?> signatureHelp({required uri, required position, triggerCharacter}) async => null;
   @override Future<List<LspLocation>> definition({required uri, required position}) async => [];
