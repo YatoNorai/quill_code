@@ -168,17 +168,18 @@ class LspStdioClient implements LspClient {
     );
   }
 
-  Future<void> _sendNotification(String method, Map<String, dynamic> params) {
-    // No flush — fire-and-forget. The OS pipe buffer drains between event-loop
-    // turns, so the data reaches the LSP server without an explicit flush.
+  /// Send a notification. Pass [flush]=false only for high-frequency
+  /// notifications like textDocument/didChange where the data will be flushed
+  /// by the next outgoing request anyway.
+  Future<void> _sendNotification(String method, Map<String, dynamic> params,
+      {bool flush = true}) {
     return _write({'jsonrpc': '2.0', 'method': method, 'params': params},
-        flush: false);
+        flush: flush);
   }
 
   // Serialises all writes through a queue so concurrent callers never race
-  // on stdin. [flush] should be true only for requests (where we await a
-  // response) — notifications use flush:false to avoid IOSink overhead.
-  Future<void> _write(Map<String, dynamic> msg, {bool flush = false}) {
+  // on stdin. Requests always flush; high-frequency notifications may skip it.
+  Future<void> _write(Map<String, dynamic> msg, {bool flush = true}) {
     return _writeQueue = _writeQueue.then((_) async {
       final body   = utf8.encode(jsonEncode(msg));
       final header = utf8.encode('Content-Length: ${body.length}\r\n\r\n');
