@@ -1,0 +1,27 @@
+{
+  "buildFiles": [
+    "D:\\apps\\quill_code\\android\\src\\main\\cpp\\CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "C:\\Users\\mathu\\AppData\\Local\\Android\\Sdk\\cmake\\3.22.1\\bin\\ninja.exe",
+      "-C",
+      "D:\\apps\\quill_code\\android\\.cxx\\Release\\4k2a3v1h\\arm64-v8a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "C:\\Users\\mathu\\AppData\\Local\\Android\\Sdk\\cmake\\3.22.1\\bin\\ninja.exe",
+    "-C",
+    "D:\\apps\\quill_code\\android\\.cxx\\Release\\4k2a3v1h\\arm64-v8a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "quill_perf::@6890427a1f51a3e7e1df": {
+      "artifactName": "quill_perf",
+      "abi": "arm64-v8a",
+      "output": "D:\\apps\\quill_code\\example\\build\\quill_code\\intermediates\\cxx\\Release\\4k2a3v1h\\obj\\arm64-v8a\\libquill_perf.so",
+      "runtimeFiles": []
+    }
+  }
+}

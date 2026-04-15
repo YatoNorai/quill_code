@@ -95,6 +95,7 @@ class QuillCodeController extends ChangeNotifier {
   String                     _completionPrefix  = '';
   int                        _completionRequestId = 0;  // cancellation token
   String?                    _completionTrigger;        // last trigger char ('.', '(', ',')
+  bool                       _lspLastIncomplete   = false; // server returned isIncomplete
 
   final Set<int> _foldedBlocks = {};
   final Set<int> _breakpoints  = {};
@@ -103,10 +104,17 @@ class QuillCodeController extends ChangeNotifier {
   Timer? _completionDebounce;
 
   // Characters that trigger LSP member/parameter completion even with empty prefix.
-  static const _triggerChars = {'.', '(', ','};
+  static const _defaultTriggerChars = {'.', '(', ','};
+
+  // Use server-reported trigger chars when available; fall back to defaults.
+  Set<String> get _effectiveTriggerChars {
+    final serverChars = _lspBinding?.triggerCharacters;
+    if (serverChars != null && serverChars.isNotEmpty) return Set.of(serverChars);
+    return _defaultTriggerChars;
+  }
 
   String? _getTriggerChar(String inserted) =>
-      inserted.length == 1 && _triggerChars.contains(inserted) ? inserted : null;
+      inserted.length == 1 && _effectiveTriggerChars.contains(inserted) ? inserted : null;
 
   // ── Multi-replace mode (Select All Occurrences) ──────────────────────────
   bool               _multiReplaceMode    = false;
@@ -546,10 +554,14 @@ class QuillCodeController extends ChangeNotifier {
     }
   }
 
-  Future<void> detachLsp() async {
+  /// Detach the LSP client.
+  ///
+  /// [sendClose] = false on tab switch (server keeps the file open, diagnostics
+  /// keep flowing).  [sendClose] = true (default) when the tab is closed.
+  Future<void> detachLsp({bool sendClose = true}) async {
     _lspDiagSub?.cancel();
     _lspDiagSub = null;
-    await _lspBinding?.close();
+    await _lspBinding?.close(sendClose: sendClose);
     _lspBinding = null;
   }
 
@@ -591,20 +603,28 @@ class QuillCodeController extends ChangeNotifier {
   /// Returns an empty list when LSP is unavailable or the cursor is outside
   /// every symbol range.
   Future<List<LspDocumentSymbol>> getBreadcrumbPath() async {
-    final symbols = await lspDocumentSymbols();
-    final pos = cursor.position;
+    try {
+      final symbols = await lspDocumentSymbols();
+      final pos = cursor.position;
 
-    List<LspDocumentSymbol> _findPath(List<LspDocumentSymbol> syms) {
-      for (final sym in syms) {
-        if (sym.range.contains(pos)) {
-          final childPath = _findPath(sym.children);
-          return [sym, ...childPath];
+      List<LspDocumentSymbol> _findPath(List<LspDocumentSymbol> syms) {
+        for (final sym in syms) {
+          if (sym.range.contains(pos)) {
+            final childPath = _findPath(sym.children);
+            return [sym, ...childPath];
+          }
         }
+        return [];
       }
+
+      return _findPath(symbols);
+    } catch (e, st) {
+      FlutterError.reportError(FlutterErrorDetails(
+        exception: e, stack: st,
+        library: 'quill_code', context: ErrorDescription('getBreadcrumbPath'),
+      ));
       return [];
     }
-
-    return _findPath(symbols);
   }
 
   /// Get LSP document highlight (all occurrences of symbol under cursor).
@@ -633,8 +653,17 @@ class QuillCodeController extends ChangeNotifier {
     final v = _content.documentVersion;
     if (v == _codeLensVersion) return;
     _codeLensVersion = v;
-    _codeLensItems = await lspCodeLens();
-    notifyListeners();
+    // try-catch is essential: this is called unawaited from a Timer callback.
+    // An unhandled async exception here becomes an invisible crash.
+    try {
+      _codeLensItems = await lspCodeLens();
+      if (_lspBinding != null) notifyListeners();
+    } catch (e, st) {
+      FlutterError.reportError(FlutterErrorDetails(
+        exception: e, stack: st,
+        library: 'quill_code', context: ErrorDescription('refreshCodeLens'),
+      ));
+    }
   }
 
   /// Apply LSP format — returns the list of text edits (caller applies them).
@@ -1116,21 +1145,27 @@ class QuillCodeController extends ChangeNotifier {
     // the server responds. The user already sees results from Phase 1.
     if (hasLsp) {
       _completionLoading = true;
-      _lspBinding!.completionsAt(pos, triggerCharacter: triggerChar).then((lspItems) {
+      // If the previous server response was incomplete, use triggerKind=3 so
+      // the server continues refining the same list rather than starting fresh.
+      final wasIncomplete = _lspLastIncomplete && triggerChar == null;
+      _lspBinding!.completionsAt(pos,
+          triggerCharacter: triggerChar,
+          retriggerIncomplete: wasIncomplete).then((result) {
         if (stale()) return;
         _completionLoading = false;
+        _lspLastIncomplete = result.isIncomplete;
         if (publisher.isCancelled) return;
         // Merge: LSP items first (semantically richer), local after.
         // De-duplicate by label so local snippets don't double up.
         final seenLabels = <String>{};
         final merged = <CompletionItem>[];
-        for (final item in [...lspItems, ...publisher.items]) {
+        for (final item in [...result.items, ...publisher.items]) {
           if (seenLabels.add(item.label)) merged.add(item);
         }
         // For trigger-char completions, LSP already pre-filtered items for the
-        // position; don't apply startsWith filter (prefix is empty).
+        // position; don't apply prefix filter (prefix is empty).
         _completionItems   = prefix.isEmpty
-            ? (_sortItems(merged))
+            ? _sortItems(merged)
             : _filterAndSort(merged, prefix);
         _completionVisible = _completionItems.isNotEmpty;
         _bumpCompletion();
@@ -1148,10 +1183,30 @@ class QuillCodeController extends ChangeNotifier {
 
   List<CompletionItem> _filterAndSort(List<CompletionItem> items, String prefix) {
     final lower = prefix.toLowerCase();
-    return items
-        .where((i) => i.effectiveFilterText.toLowerCase().startsWith(lower))
-        .toList()
-      ..sort((a, b) => a.effectiveSortText.compareTo(b.effectiveSortText));
+    final filtered = items.where((i) => _fuzzyMatch(i.effectiveFilterText.toLowerCase(), lower)).toList();
+    filtered.sort((a, b) {
+      // Prefix matches rank above fuzzy/subsequence matches for discoverability.
+      final aFt = a.effectiveFilterText.toLowerCase();
+      final bFt = b.effectiveFilterText.toLowerCase();
+      final aPrefix = aFt.startsWith(lower);
+      final bPrefix = bFt.startsWith(lower);
+      if (aPrefix != bPrefix) return aPrefix ? -1 : 1;
+      return a.effectiveSortText.compareTo(b.effectiveSortText);
+    });
+    return filtered;
+  }
+
+  /// Fuzzy/subsequence match: all characters of [pattern] appear in [text]
+  /// in order. Prefix match is included (startsWith is a trivial subsequence).
+  static bool _fuzzyMatch(String text, String pattern) {
+    if (pattern.isEmpty) return true;
+    int ti = 0;
+    for (int pi = 0; pi < pattern.length; pi++) {
+      final idx = text.indexOf(pattern[pi], ti);
+      if (idx == -1) return false;
+      ti = idx + 1;
+    }
+    return true;
   }
 
   List<CompletionItem> _sortItems(List<CompletionItem> items) =>
@@ -1186,10 +1241,11 @@ class QuillCodeController extends ChangeNotifier {
 
   void hideCompletion() {
     if (!_completionVisible && _completionItems.isEmpty && !_completionLoading) return;
-    _completionVisible = false;
-    _completionLoading = false;
-    _completionItems   = [];
-    _completionTrigger = null;
+    _completionVisible   = false;
+    _completionLoading   = false;
+    _completionItems     = [];
+    _completionTrigger   = null;
+    _lspLastIncomplete   = false;
     ++_completionRequestId; // invalidate any in-flight LSP request
     _completionDebounce?.cancel();
     _bumpCompletion();

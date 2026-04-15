@@ -3,7 +3,12 @@
     "allow": [
       "Bash(flutter analyze:*)",
       "Bash(git submodule:*)",
-      "Bash(git worktree:*)"
+      "Bash(git worktree:*)",
+      "Bash(dart analyze:*)",
+      "Bash(grep -n \"insertSnippet\\\\|_processSnippet\\\\|\\\\$1\\\\|\\\\$0\\\\|tabStop\\\\|snippet\" \"D:/apps/quill_code/lib/src/core/editor_controller.dart\")",
+      "Bash(flutter pub:*)",
+      "Bash(dart pub:*)",
+      "Bash(where flutter:*)"
     ]
   }
 }

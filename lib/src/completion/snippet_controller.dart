@@ -64,19 +64,21 @@ class SnippetController {
 
   void _computeRanges(CharPosition insertAt, String text, CodeSnippet snippet) {
     _tabStopRanges.clear();
-    // Build position map
+    // Build char-index → editor-position map for the full expanded text.
     int line = insertAt.line, col = insertAt.column;
     final positions = <int, CharPosition>{0: insertAt};
     for (int i = 0; i < text.length; i++) {
       if (text[i] == '\n') { line++; col = 0; } else { col++; }
       positions[i + 1] = CharPosition(line, col);
     }
-    int offset = 0;
-    for (final ts in snippet.tabStops) {
+    // Walk tab stops using their correct offsets within the plain text.
+    // Previously this used a running accumulator of placeholder lengths only,
+    // which ignored all static text parts and placed every tab stop at offset 0.
+    // e.g. "SizedBox($1)" → tab stop 1 at offset 8 (after "SizedBox("), not 0.
+    for (final (:offset, :tabStop) in snippet.tabStopOffsets) {
       final start = positions[offset] ?? insertAt;
-      final end = positions[offset + ts.placeholder.length] ?? start;
-      _tabStopRanges[ts.index] = EditorRange(start, end);
-      offset += ts.placeholder.length;
+      final end   = positions[offset + tabStop.placeholder.length] ?? start;
+      _tabStopRanges[tabStop.index] = EditorRange(start, end);
     }
   }
 

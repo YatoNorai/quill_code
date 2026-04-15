@@ -16,11 +16,25 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart';
 import 'lsp_bridge.dart';
 import '../core/char_position.dart';
 import '../text/text_range.dart';
 import '../diagnostics/diagnostic_region.dart';
+
+// Top-level function required by compute() — Isolate entry points must be
+// top-level or static. Parses the JSON LSP message off the main thread.
+Map<String, dynamic> _parseJsonMsg(String s) =>
+    jsonDecode(s) as Map<String, dynamic>;
+
+void _lspError(String context, Object e, StackTrace st) {
+  FlutterError.reportError(FlutterErrorDetails(
+    exception: e,
+    stack: st,
+    library: 'quill_code/lsp_stdio',
+    context: ErrorDescription(context),
+  ));
+}
 
 class LspStdioClient implements LspClient {
   final String executable;
@@ -29,17 +43,28 @@ class LspStdioClient implements LspClient {
   final String languageId;
   final Map<String, String>? environment;
 
+  /// Seconds to wait for the `initialize` response.  Set higher for JVM-based
+  /// servers (kotlin-language-server, jdtls) which need 20–60 s to start.
+  final int initializeTimeoutSeconds;
+
   late final Process _process;
-  final _buffer      = <int>[];
-  int   _scanFrom    = 0; // avoid re-scanning already-checked bytes in _findHeaderEnd
+  final _buffer   = <int>[];
+  int   _bufStart = 0; // logical start of unprocessed bytes — avoids O(n) front removal
   final _pending  = <int, Completer<Map<String, dynamic>>>{};
   final _diagCtrl = StreamController<Map<String, dynamic>>.broadcast();
   int  _nextId    = 1;
   bool _ready     = false;
   Future<void> _writeQueue = Future.value();
+  /// URIs that have received textDocument/didOpen and not yet didClose.
+  /// Guards against double-open (e.g. workspace scan + editor open same file).
+  final _openUris = <String>{};
+  List<String> _triggerCharacters = const ['.', '(', ','];
 
   /// Called when the process crashes, writes fail, or messages fail to parse.
   void Function(String message)? onError;
+
+  @override
+  bool get isReady => _ready;
 
   LspStdioClient._({
     required this.executable,
@@ -47,17 +72,24 @@ class LspStdioClient implements LspClient {
     required this.workspacePath,
     required this.languageId,
     this.environment,
+    this.initializeTimeoutSeconds = 5,
   });
 
   // ── Factory ───────────────────────────────────────────────────────────────
 
   /// Start the LSP server process and perform the initialize handshake.
+  ///
+  /// [onError] is wired before the process starts so early stderr/crash
+  /// messages are never lost.  Check [isReady] after this returns to detect
+  /// a failed initialize handshake.
   static Future<LspStdioClient> start({
     required String executable,
     required String workspacePath,
     required String languageId,
     List<String> args = const [],
     Map<String, String>? environment,
+    int initializeTimeoutSeconds = 5,
+    void Function(String message)? onError,
   }) async {
     final client = LspStdioClient._(
       executable:    executable,
@@ -65,14 +97,18 @@ class LspStdioClient implements LspClient {
       workspacePath: workspacePath,
       languageId:    languageId,
       environment:   environment,
+      initializeTimeoutSeconds: initializeTimeoutSeconds,
     );
+    client.onError = onError;  // wire BEFORE _start so early stderr is caught
     await client._start();
     return client;
   }
 
   Future<void> _start() async {
     _process = await Process.start(executable, args, environment: environment);
-    _process.stdout.listen(_onData);
+    _process.stdout.listen(_onData, onError: (e, st) {
+      _lspError('stdout stream error', e, st as StackTrace);
+    });
     _process.stderr.listen(
       (d) {
         final msg = utf8.decode(d);
@@ -92,69 +128,128 @@ class LspStdioClient implements LspClient {
   // ── LSP wire protocol ─────────────────────────────────────────────────────
 
   void _onData(List<int> data) {
-    _buffer.addAll(data);
-    while (true) {
-      final sep = _findHeaderEnd();
-      if (sep == -1) return;
-      // Extract Content-Length without allocating a full sublist — scan the
-      // header bytes directly for the numeric value.
-      final headerStr = utf8.decode(_buffer.sublist(0, sep));
-      final match = _clRx.firstMatch(headerStr);
-      if (match == null) { _buffer.clear(); _scanFrom = 0; return; }
-      final length   = int.parse(match.group(1)!);
-      final msgStart = sep + 4; // past \r\n\r\n
-      if (_buffer.length < msgStart + length) return;
-      final body = _buffer.sublist(msgStart, msgStart + length);
-      _buffer.removeRange(0, msgStart + length);
-      _scanFrom = 0; // reset scan pointer after consuming a message
-      try {
-        _onMessage(jsonDecode(utf8.decode(body)) as Map<String, dynamic>);
-      } catch (e) {
-        debugPrint('[LSP] parse error: $e');
-        onError?.call('LSP message parse error: $e');
+    try {
+      _buffer.addAll(data);
+      while (true) {
+        final sep = _findHeaderEnd(); // relative offset from _bufStart
+        if (sep == -1) return;
+        final headerStr = utf8.decode(_buffer.sublist(_bufStart, _bufStart + sep));
+        final match = _clRx.firstMatch(headerStr);
+        if (match == null) { _buffer.clear(); _bufStart = 0; return; }
+        final length   = int.parse(match.group(1)!);
+        final msgStart = sep + 4; // past \r\n\r\n (relative to _bufStart)
+        final msgEnd   = _bufStart + msgStart + length;
+        if (_buffer.length < msgEnd) return;
+        final bodyBytes = _buffer.sublist(_bufStart + msgStart, msgEnd);
+        // Advance the logical start — O(1), no copy.
+        _bufStart = msgEnd;
+        // Compact only when the wasted prefix is large enough to matter (64 KB).
+        // This amortises the O(n) removeRange over many messages.
+        if (_bufStart > 65536) {
+          _buffer.removeRange(0, _bufStart);
+          _bufStart = 0;
+        }
+        final bodyStr = utf8.decode(bodyBytes);
+        // Use an Isolate only for large messages — compute() has ~2 ms dispatch
+        // overhead that exceeds the benefit for small messages (< 8 KB).
+        // Hover, definition, and most notifications are well under 8 KB;
+        // large completion responses from das can be 50–500 KB.
+        if (bodyStr.length > 8192) {
+          compute(_parseJsonMsg, bodyStr).then(_onMessage).catchError((Object e, StackTrace st) {
+            _lspError('processing LSP message', e, st);
+            onError?.call('LSP message error: $e');
+          });
+        } else {
+          try {
+            _onMessage(jsonDecode(bodyStr) as Map<String, dynamic>);
+          } catch (e, st) {
+            _lspError('processing LSP message', e, st);
+            onError?.call('LSP message error: $e');
+          }
+        }
       }
+    } catch (e, st) {
+      _lspError('_onData (LSP framing)', e, st);
     }
   }
 
   // Compiled once — avoids per-call RegExp allocation.
   static final _clRx = RegExp(r'Content-Length:\s*(\d+)');
 
+  // Returns the offset of the \r\n\r\n separator *relative to _bufStart*,
+  // or -1 if not yet arrived. Searching from _bufStart skips already-consumed bytes.
   int _findHeaderEnd() {
-    // Start from _scanFrom (max 3 back for the partial-match boundary) so we
-    // never re-scan bytes that were already checked in a previous _onData call.
-    final start = _scanFrom > 3 ? _scanFrom - 3 : 0;
-    for (int i = start; i <= _buffer.length - 4; i++) {
+    final end = _buffer.length - 3;
+    for (int i = _bufStart; i < end; i++) {
       if (_buffer[i]   == 13 && _buffer[i+1] == 10 &&
-          _buffer[i+2] == 13 && _buffer[i+3] == 10) {
-        _scanFrom = i + 4;
-        return i;
-      }
+          _buffer[i+2] == 13 && _buffer[i+3] == 10) return i - _bufStart;
     }
-    // Remember how far we scanned so the next call continues from here.
-    _scanFrom = _buffer.length > 3 ? _buffer.length - 3 : 0;
     return -1;
   }
 
   void _onMessage(Map<String, dynamic> msg) {
-    final id = msg['id'];
+    final id     = msg['id'];
+    final method = msg['method'] as String?;
+
     if (id != null && _pending.containsKey(id)) {
-      // Response to a request
+      // Response to one of our own requests.
       _pending.remove(id)!.complete(msg);
-    } else if (msg.containsKey('method')) {
-      // Server-initiated notification (e.g. publishDiagnostics)
-      _onNotification(msg);
+    } else if (method != null) {
+      if (id != null) {
+        // Server-initiated request (e.g. jdtls `workspace/configuration`).
+        // We must reply or the server stalls waiting.  Return null for every
+        // method we don't know about — servers must tolerate unknown config.
+        _handleServerRequest(id, method, msg['params']);
+      } else {
+        // Pure notification (no id).
+        _onNotification(method, msg);
+      }
     }
   }
 
-  void _onNotification(Map<String, dynamic> msg) {
-    final method = msg['method'] as String? ?? '';
+  /// Responds to server-initiated requests that we receive during or after
+  /// initialization.  jdtls sends `workspace/configuration` early; without a
+  /// response it can block the initialize handshake indefinitely.
+  void _handleServerRequest(dynamic id, String method, dynamic params) {
+    switch (method) {
+      case 'workspace/configuration':
+        // Return a null entry for every configuration item requested.
+        final items = params is List ? params : (params is Map ? params['items'] ?? [] : []);
+        _write({
+          'jsonrpc': '2.0',
+          'id': id,
+          'result': List.filled((items as List).length, null),
+        });
+
+      case 'workspace/applyEdit':
+        // Acknowledge but do not apply — we have no write-back mechanism yet.
+        _write({'jsonrpc': '2.0', 'id': id, 'result': {'applied': false}});
+
+      case 'window/showMessageRequest':
+        // Dismiss by returning null (user clicked nothing).
+        _write({'jsonrpc': '2.0', 'id': id, 'result': null});
+
+      default:
+        // Unknown server request — send a "method not found" error so the
+        // server can give up waiting rather than hanging.
+        _write({
+          'jsonrpc': '2.0',
+          'id': id,
+          'error': {'code': -32601, 'message': 'Method not found: $method'},
+        });
+    }
+  }
+
+  void _onNotification(String method, Map<String, dynamic> msg) {
     if (method == 'textDocument/publishDiagnostics') {
       _diagCtrl.add(msg);
     }
+    // window/logMessage, window/showMessage, $/progress, etc. are silently
+    // dropped — we don't surface them in the UI yet.
   }
 
   Future<Map<String, dynamic>> _sendRequest(
-      String method, Map<String, dynamic> params) async {
+      String method, Map<String, dynamic> params, {int? timeoutSeconds}) async {
     final id        = _nextId++;
     final completer = Completer<Map<String, dynamic>>();
     _pending[id]    = completer;
@@ -162,8 +257,9 @@ class LspStdioClient implements LspClient {
     // the response. Notifications skip flush (fire-and-forget).
     await _write({'jsonrpc': '2.0', 'id': id, 'method': method, 'params': params},
         flush: true);
+    final secs = timeoutSeconds ?? 5;
     return completer.future.timeout(
-      const Duration(seconds: 5),
+      Duration(seconds: secs),
       onTimeout: () { _pending.remove(id); return {}; },
     );
   }
@@ -183,8 +279,17 @@ class LspStdioClient implements LspClient {
     return _writeQueue = _writeQueue.then((_) async {
       final body   = utf8.encode(jsonEncode(msg));
       final header = utf8.encode('Content-Length: ${body.length}\r\n\r\n');
-      _process.stdin.add([...header, ...body]);
-      if (flush) await _process.stdin.flush();
+      // Two separate add() calls instead of [...header, ...body] — avoids
+      // allocating a merged list that can be 100 KB+ for large requests.
+      _process.stdin.add(header);
+      _process.stdin.add(body);
+      if (flush) {
+        // Timeout guards against hanging when the LSP process's stdin buffer
+        // fills up (server busy/crashed) — without this the write queue stalls
+        // forever and the editor freezes.
+        await _process.stdin.flush()
+            .timeout(const Duration(seconds: 3), onTimeout: () {});
+      }
     }).catchError((e) {
       debugPrint('[LSP] write error: $e');
       onError?.call('LSP write error: $e');
@@ -201,7 +306,12 @@ class LspStdioClient implements LspClient {
         'textDocument': {
           'synchronization': {'didOpen': true, 'didChange': true, 'didClose': true},
           'completion': {
-            'completionItem': {'snippetSupport': true, 'documentationFormat': ['markdown', 'plaintext']},
+            'contextSupport': true,           // server must honour context.triggerCharacter
+            'completionItem': {
+              'snippetSupport': true,
+              'documentationFormat': ['markdown', 'plaintext'],
+              'resolveSupport': {'properties': ['documentation', 'detail']},
+            },
           },
           'hover': {'contentFormat': ['markdown', 'plaintext']},
           'definition': {'linkSupport': false},
@@ -210,17 +320,39 @@ class LspStdioClient implements LspClient {
           'formatting': {},
           'codeAction': {'codeActionLiteralSupport': {'codeActionKind': {'valueSet': ['quickfix', 'refactor']}}},
         },
-        'workspace': {'workspaceFolders': true},
+        'workspace': {
+          'workspaceFolders': true,
+          // Advertise configuration support so jdtls sends workspace/configuration
+          // requests that we can respond to (via _handleServerRequest) rather than
+          // blocking indefinitely waiting for a capability we never declared.
+          'configuration': true,
+        },
       },
       'workspaceFolders': [
         {'uri': _pathToUri(workspacePath), 'name': workspacePath.split('/').last},
       ],
-    });
+    }, timeoutSeconds: initializeTimeoutSeconds);  // JVM servers need 20–60 s
     if (result.isNotEmpty) {
       await _sendNotification('initialized', {});
       _ready = true;
+      // Read server-advertised trigger characters so the editor can react to them.
+      final cp = result['result']?['capabilities']?['completionProvider']
+                 ?? result['capabilities']?['completionProvider'];
+      if (cp is Map) {
+        final tc = cp['triggerCharacters'];
+        if (tc is List && tc.isNotEmpty) {
+          _triggerCharacters = tc.cast<String>();
+        }
+      }
+    } else {
+      final msg = 'LSP $languageId: initialize timed out after ${initializeTimeoutSeconds}s';
+      debugPrint('[LSP] $msg');
+      onError?.call(msg);
     }
   }
+
+  @override
+  List<String> get triggerCharacters => _triggerCharacters;
 
   // ── LspClient interface ───────────────────────────────────────────────────
 
@@ -232,7 +364,11 @@ class LspStdioClient implements LspClient {
     required int version,
   }) async {
     if (!_ready) return;
-    _sendNotification('textDocument/didOpen', {
+    if (_openUris.contains(uri)) return; // already open — skip duplicate
+    _openUris.add(uri);
+    // Flush immediately so the server indexes the file right away and can
+    // start sending publishDiagnostics without waiting for the next request.
+    await _sendNotification('textDocument/didOpen', {
       'textDocument': {'uri': uri, 'languageId': languageId, 'version': version, 'text': text},
     });
   }
@@ -244,41 +380,57 @@ class LspStdioClient implements LspClient {
     required int version,
   }) async {
     if (!_ready) return;
+    // flush: false — flushed by the next request (completion/hover/definition).
+    // This avoids blocking the write queue on every keystroke debounce cycle.
     _sendNotification('textDocument/didChange', {
       'textDocument': {'uri': uri, 'version': version},
       'contentChanges': [{'text': text}],
-    });
+    }, flush: false);
   }
 
   @override
   Future<void> didClose({required String uri}) async {
     if (!_ready) return;
+    if (!_openUris.remove(uri)) return; // wasn't open — skip
+    // flush: false — low priority, server will process when stdin is next flushed.
     _sendNotification('textDocument/didClose', {
       'textDocument': {'uri': uri},
-    });
+    }, flush: false);
   }
 
   @override
-  Future<List<LspCompletionResult>> completion({
+  Future<LspCompletionList> completion({
     required String uri,
     required CharPosition position,
     String? triggerCharacter,
+    bool retriggerIncomplete = false,
   }) async {
-    if (!_ready) return [];
+    if (!_ready) return LspCompletionList.empty;
     final params = <String, dynamic>{
       'textDocument': {'uri': uri},
       'position': {'line': position.line, 'character': position.column},
     };
-    if (triggerCharacter != null) {
+    if (retriggerIncomplete) {
+      // User typed more chars after an incomplete completion — ask server to
+      // continue the previous list (triggerKind=3).
+      params['context'] = {'triggerKind': 3};
+    } else if (triggerCharacter != null) {
       params['context'] = {
-        'triggerKind': 2,           // TriggerCharacter
+        'triggerKind': 2,             // TriggerCharacter
         'triggerCharacter': triggerCharacter,
         'isRetrigger': false,
       };
+    } else {
+      params['context'] = {'triggerKind': 1}; // Invoked
     }
     final resp = await _sendRequest('textDocument/completion', params);
-    final items = _extractItems(resp['result']);
-    return items.map(_parseCompletion).toList();
+    final result = resp['result'];
+    final isIncomplete = result is Map ? (result['isIncomplete'] as bool? ?? false) : false;
+    final items = _extractItems(result);
+    return LspCompletionList(
+      items: items.map(_parseCompletion).toList(),
+      isIncomplete: isIncomplete,
+    );
   }
 
   @override
@@ -336,19 +488,46 @@ class LspStdioClient implements LspClient {
     return _diagMap[uri] ?? [];
   }
 
-  /// Call this to start listening for publishDiagnostics from the server.
-  /// Returns a StreamSubscription — cancel it when done.
+  @override
   StreamSubscription<List<LspDiagnostic>> listenDiagnostics(
       String uri, void Function(List<LspDiagnostic>) onDiag) {
     return _diagCtrl.stream
         .where((m) => (m['params']?['uri'] as String?) == uri)
         .map((m) {
-          final rawDiags = (m['params']?['diagnostics'] as List?) ?? [];
-          final diags = rawDiags.map((d) => _parseDiagnostic(d as Map)).toList();
-          _diagMap[uri] = diags;
-          return diags;
+          // try/catch is CRITICAL here: an exception inside .map() becomes a
+          // stream error. Without onError on .listen(), that error is unhandled
+          // and crashes the app invisibly.
+          try {
+            final rawDiags = (m['params']?['diagnostics'] as List?) ?? [];
+            final diags = rawDiags
+                .map((d) => _parseDiagnostic(d as Map))
+                .toList();
+            _diagMap[uri] = diags;
+            return diags;
+          } catch (e, st) {
+            _lspError('parsing publishDiagnostics notification', e, st);
+            return <LspDiagnostic>[];
+          }
         })
-        .listen(onDiag);
+        .listen(onDiag, onError: (_) {});  // belt-and-suspenders: silence any
+                                            // stream errors that slip through
+  }
+
+  @override
+  StreamSubscription<void> listenAllDiagnostics(
+      void Function(String uri, List<LspDiagnostic>) onDiag) {
+    return _diagCtrl.stream.listen((m) {
+      final uri = m['params']?['uri'] as String?;
+      if (uri == null) return;
+      try {
+        final rawDiags = (m['params']?['diagnostics'] as List?) ?? [];
+        final diags = rawDiags.map((d) => _parseDiagnostic(d as Map)).toList();
+        _diagMap[uri] = diags;
+        onDiag(uri, diags);
+      } catch (e, st) {
+        _lspError('listenAllDiagnostics', e, st);
+      }
+    }, onError: (_) {});
   }
 
   @override
@@ -470,24 +649,35 @@ class LspStdioClient implements LspClient {
   @override
   Future<List<LspDocumentSymbol>> documentSymbols({required String uri}) async {
     if (!_ready) return [];
-    final resp = await _sendRequest('textDocument/documentSymbol', {
-      'textDocument': {'uri': uri},
-    });
-    final result = resp['result'];
-    if (result is! List) return [];
-    return result.map((s) => _parseSymbol(s as Map)).toList();
+    try {
+      final resp = await _sendRequest('textDocument/documentSymbol', {
+        'textDocument': {'uri': uri},
+      });
+      final result = resp['result'];
+      if (result is! List) return [];
+      return result.map((s) => _parseSymbol(s as Map)).toList();
+    } catch (e, st) { _lspError('documentSymbols', e, st); return []; }
   }
 
   LspDocumentSymbol _parseSymbol(Map s) {
     final children = (s['children'] as List? ?? [])
         .map((c) => _parseSymbol(c as Map))
         .toList();
+    // selectionRange is required in DocumentSymbol but optional in
+    // SymbolInformation — fall back to range when absent.
+    final rangeMap       = s['range'] as Map?;
+    final range          = rangeMap != null
+        ? _decodeRange(rangeMap)
+        : const EditorRange(CharPosition(0, 0), CharPosition(0, 0));
+    final selectionRange = s['selectionRange'] != null
+        ? _decodeRange(s['selectionRange'] as Map)
+        : range;
     return LspDocumentSymbol(
       name:           s['name'] as String? ?? '',
       detail:         s['detail'] as String?,
       kind:           s['kind'] as int? ?? 1,
-      range:          _decodeRange(s['range'] as Map),
-      selectionRange: _decodeRange(s['selectionRange'] as Map),
+      range:          range,
+      selectionRange: selectionRange,
       children:       children,
     );
   }
@@ -498,13 +688,15 @@ class LspStdioClient implements LspClient {
     required CharPosition position,
   }) async {
     if (!_ready) return [];
-    final resp = await _sendRequest('textDocument/documentHighlight', {
-      'textDocument': {'uri': uri},
-      'position': {'line': position.line, 'character': position.column},
-    });
-    final result = resp['result'];
-    if (result is! List) return [];
-    return result.map((h) => _decodeRange((h as Map)['range'] as Map)).toList();
+    try {
+      final resp = await _sendRequest('textDocument/documentHighlight', {
+        'textDocument': {'uri': uri},
+        'position': {'line': position.line, 'character': position.column},
+      });
+      final result = resp['result'];
+      if (result is! List) return [];
+      return result.map((h) => _decodeRange((h as Map)['range'] as Map)).toList();
+    } catch (e, st) { _lspError('documentHighlight', e, st); return []; }
   }
 
   @override
@@ -513,46 +705,50 @@ class LspStdioClient implements LspClient {
     required EditorRange range,
   }) async {
     if (!_ready) return [];
-    final resp = await _sendRequest('textDocument/inlayHint', {
-      'textDocument': {'uri': uri},
-      'range': _encodeRange(range),
-    });
-    final result = resp['result'];
-    if (result is! List) return [];
-    return result.map((h) {
-      final m = h as Map;
-      final pos = m['position'] as Map;
-      final rawLabel = m['label'];
-      final label = rawLabel is String ? rawLabel
-          : (rawLabel is List ? rawLabel.map((l) => (l as Map)['value'] ?? '').join('') : '');
-      return LspInlayHint(
-        position:    CharPosition(pos['line'] as int, pos['character'] as int),
-        label:       label as String,
-        isParameter: (m['kind'] as int? ?? 1) == 2,
-      );
-    }).toList();
+    try {
+      final resp = await _sendRequest('textDocument/inlayHint', {
+        'textDocument': {'uri': uri},
+        'range': _encodeRange(range),
+      });
+      final result = resp['result'];
+      if (result is! List) return [];
+      return result.map((h) {
+        final m = h as Map;
+        final pos = m['position'] as Map;
+        final rawLabel = m['label'];
+        final label = rawLabel is String ? rawLabel
+            : (rawLabel is List ? rawLabel.map((l) => (l as Map)['value'] ?? '').join('') : '');
+        return LspInlayHint(
+          position:    CharPosition(pos['line'] as int, pos['character'] as int),
+          label:       label as String,
+          isParameter: (m['kind'] as int? ?? 1) == 2,
+        );
+      }).toList();
+    } catch (e, st) { _lspError('inlayHints', e, st); return []; }
   }
 
   @override
   Future<List<LspCodeLens>> codeLens({required String uri}) async {
     if (!_ready) return [];
-    final resp = await _sendRequest('textDocument/codeLens', {
-      'textDocument': {'uri': uri},
-    });
-    final result = resp['result'];
-    if (result is! List) return [];
-    return result.map((item) {
-      final m = item as Map;
-      final range = _decodeRange(m['range'] as Map);
-      final cmd = m['command'] as Map?;
-      return LspCodeLens(
-        range:       range,
-        title:       cmd?['title'] as String?,
-        command:     cmd?['command'] as String?,
-        commandArgs: cmd?['arguments'] as List?,
-        data:        m['data'] as Map<String, dynamic>?,
-      );
-    }).toList();
+    try {
+      final resp = await _sendRequest('textDocument/codeLens', {
+        'textDocument': {'uri': uri},
+      });
+      final result = resp['result'];
+      if (result is! List) return [];
+      return result.map((item) {
+        final m = item as Map;
+        final range = _decodeRange(m['range'] as Map);
+        final cmd = m['command'] as Map?;
+        return LspCodeLens(
+          range:       range,
+          title:       cmd?['title'] as String?,
+          command:     cmd?['command'] as String?,
+          commandArgs: cmd?['arguments'] as List?,
+          data:        m['data'] as Map<String, dynamic>?,
+        );
+      }).toList();
+    } catch (e, st) { _lspError('codeLens', e, st); return []; }
   }
 
   @override
@@ -573,7 +769,7 @@ class LspStdioClient implements LspClient {
         commandArgs: cmd?['arguments'] as List? ?? item.commandArgs,
         data:        item.data,
       );
-    } catch (_) { return null; }
+    } catch (e, st) { _lspError('resolveCodeLens', e, st); return null; }
   }
 
   @override
@@ -601,7 +797,7 @@ class LspStdioClient implements LspClient {
         kind:          item.kind,
         isSnippet:     item.isSnippet,
       );
-    } catch (_) { return null; }
+    } catch (e, st) { _lspError('resolveCompletion', e, st); return null; }
   }
 
   /// Completes all pending requests with empty responses and closes the
@@ -643,9 +839,31 @@ class LspStdioClient implements LspClient {
 
   LspCompletionResult _parseCompletion(Map item) {
     final kind = _completionKind(item['kind'] as int? ?? 1);
-    final insertText = item['insertText'] as String?
+    bool isSnippet = (item['insertTextFormat'] as int? ?? 1) == 2;
+
+    // LSP spec: textEdit.newText takes priority over insertText (§Completion Item).
+    // The Dart analysis server uses textEdit with proper snippet markers.
+    final textEdit = item['textEdit'] as Map?;
+    String insertText = (textEdit != null
+        ? textEdit['newText'] as String?
+        : null)
+        ?? item['insertText'] as String?
         ?? item['label'] as String? ?? '';
-    final isSnippet = (item['insertTextFormat'] as int? ?? 1) == 2;
+
+    // Some servers use "Foo(...)" or "Foo(…)" (Unicode ellipsis U+2026) to
+    // signal "callable with arguments". Convert to a proper $1 snippet so the
+    // cursor lands inside the parens. Apply even if insertTextFormat=2 was set,
+    // since the server may have forgotten to escape its ellipsis as a snippet.
+    if (!insertText.contains(r'$')) {
+      if (insertText.endsWith('(...)')) {
+        insertText = '${insertText.substring(0, insertText.length - 5)}(\$1)';
+        isSnippet = true;
+      } else if (insertText.endsWith('(\u2026)')) {
+        // Unicode ellipsis (…) is a single code unit: length = 3 for "(…)"
+        insertText = '${insertText.substring(0, insertText.length - 3)}(\$1)';
+        isSnippet = true;
+      }
+    }
     String? doc;
     final documentation = item['documentation'];
     if (documentation is String) {

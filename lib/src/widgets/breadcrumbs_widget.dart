@@ -66,8 +66,15 @@ class _BreadcrumbsWidgetState extends State<BreadcrumbsWidget> {
 
   Future<void> _refresh() async {
     if (!mounted) return;
-    final path = await widget.controller.getBreadcrumbPath();
-    if (mounted) setState(() => _path = path);
+    try {
+      final path = await widget.controller.getBreadcrumbPath();
+      if (mounted) setState(() => _path = path);
+    } catch (e, st) {
+      FlutterError.reportError(FlutterErrorDetails(
+        exception: e, stack: st,
+        library: 'quill_code', context: ErrorDescription('BreadcrumbsWidget._refresh'),
+      ));
+    }
   }
 
   @override

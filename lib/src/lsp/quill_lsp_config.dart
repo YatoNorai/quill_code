@@ -138,12 +138,19 @@ class QuillLspStdioConfig extends QuillLspConfig {
   /// Optional environment variables for the server process.
   final Map<String, String>? environment;
 
+  /// How long (in seconds) to wait for the server to reply to the initial
+  /// `initialize` handshake. Fast native servers (gopls, dart, pylsp) respond
+  /// in < 2 s. JVM-based servers (kotlin-language-server, jdtls) can take
+  /// 20–60 s because they spin up a full JVM before they can handle messages.
+  final int initializeTimeoutSeconds;
+
   const QuillLspStdioConfig({
     required this.executable,
     required super.languageId,
     required super.workspacePath,
     this.args = const [],
     this.environment,
+    this.initializeTimeoutSeconds = 5,
     super.capabilities,
   });
 }

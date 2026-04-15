@@ -2,11 +2,20 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show WebSocket;
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart';
 import 'lsp_bridge.dart';
 import '../core/char_position.dart';
 import '../text/text_range.dart';
 import '../diagnostics/diagnostic_region.dart';
+
+void _lspError(String context, Object e, StackTrace st) {
+  FlutterError.reportError(FlutterErrorDetails(
+    exception: e,
+    stack: st,
+    library: 'quill_code/lsp_socket',
+    context: ErrorDescription(context),
+  ));
+}
 
 class LspSocketClient implements LspClient {
   final String serverUrl;
@@ -17,11 +26,16 @@ class LspSocketClient implements LspClient {
   final _pending  = <int, Completer<Map<String, dynamic>>>{};
   final _diagMap  = <String, List<LspDiagnostic>>{};
   final _diagCtrl = StreamController<Map<String, dynamic>>.broadcast();
+  final _openUris = <String>{};
   int  _nextId = 1;
   bool _ready  = false;
+  List<String> _triggerCharacters = const ['.', '(', ','];
 
   /// Called when the socket errors or messages fail to parse.
   void Function(String message)? onError;
+
+  @override
+  bool get isReady => _ready;
 
   LspSocketClient({required this.serverUrl, required this.workspacePath, required this.languageId});
 
@@ -62,7 +76,14 @@ class LspSocketClient implements LspClient {
     if (id != null && _pending.containsKey(id)) { _pending.remove(id)!.complete(msg); return; }
     if (msg['method'] == 'textDocument/publishDiagnostics') {
       final uri = msg['params']?['uri'] as String? ?? '';
-      _diagMap[uri] = ((msg['params']?['diagnostics'] as List?) ?? []).map((d) => _diag(d as Map)).toList();
+      try {
+        _diagMap[uri] = ((msg['params']?['diagnostics'] as List?) ?? [])
+            .map((d) => _diag(d as Map))
+            .toList();
+      } catch (e, st) {
+        _lspError('parsing publishDiagnostics notification', e, st);
+        _diagMap[uri] = [];
+      }
       _diagCtrl.add(msg);
     }
   }
@@ -82,16 +103,29 @@ class LspSocketClient implements LspClient {
     final r = await _req('initialize', {
       'processId': null, 'rootUri': _uri(workspacePath),
       'capabilities': {'textDocument': {'synchronization': {'didOpen': true, 'didChange': true, 'didClose': true},
-        'completion': {'completionItem': {'snippetSupport': true}}, 'hover': {'contentFormat': ['markdown','plaintext']},
+        'completion': {'contextSupport': true, 'completionItem': {'snippetSupport': true, 'documentationFormat': ['markdown', 'plaintext'], 'resolveSupport': {'properties': ['documentation', 'detail']}}},
+        'hover': {'contentFormat': ['markdown','plaintext']},
         'definition': {}, 'references': {}, 'publishDiagnostics': {'relatedInformation': true},
         'formatting': {}, 'codeAction': {}}, 'workspace': {'workspaceFolders': true}},
       'workspaceFolders': [{'uri': _uri(workspacePath), 'name': workspacePath.split('/').last}],
     });
-    if (r.isNotEmpty) { _not('initialized', {}); _ready = true; }
+    if (r.isNotEmpty) {
+      _not('initialized', {});
+      _ready = true;
+      final cp = r['capabilities']?['completionProvider'];
+      if (cp is Map) {
+        final tc = cp['triggerCharacters'];
+        if (tc is List && tc.isNotEmpty) _triggerCharacters = tc.cast<String>();
+      }
+    }
   }
+
+  @override List<String> get triggerCharacters => _triggerCharacters;
 
   @override Future<void> didOpen({required String uri, required String languageId, required String text, required int version}) async {
     if (!_ready) return;
+    if (_openUris.contains(uri)) return;
+    _openUris.add(uri);
     _not('textDocument/didOpen', {'textDocument': {'uri': uri, 'languageId': languageId, 'version': version, 'text': text}});
   }
   @override Future<void> didChange({required String uri, required String text, required int version}) async {
@@ -100,17 +134,24 @@ class LspSocketClient implements LspClient {
   }
   @override Future<void> didClose({required String uri}) async {
     if (!_ready) return;
+    if (!_openUris.remove(uri)) return;
     _not('textDocument/didClose', {'textDocument': {'uri': uri}});
   }
 
-  @override Future<List<LspCompletionResult>> completion({required String uri, required CharPosition position, String? triggerCharacter}) async {
-    if (!_ready) return [];
+  @override Future<LspCompletionList> completion({required String uri, required CharPosition position, String? triggerCharacter, bool retriggerIncomplete = false}) async {
+    if (!_ready) return LspCompletionList.empty;
     final params = <String, dynamic>{'textDocument': {'uri': uri}, 'position': _p(position)};
-    if (triggerCharacter != null) {
+    if (retriggerIncomplete) {
+      params['context'] = {'triggerKind': 3};
+    } else if (triggerCharacter != null) {
       params['context'] = {'triggerKind': 2, 'triggerCharacter': triggerCharacter};
+    } else {
+      params['context'] = {'triggerKind': 1};
     }
     final r = await _req('textDocument/completion', params);
-    return _items(r['result']).map(_comp).toList();
+    final result = r['result'];
+    final isIncomplete = result is Map ? (result['isIncomplete'] as bool? ?? false) : false;
+    return LspCompletionList(items: _items(result).map(_comp).toList(), isIncomplete: isIncomplete);
   }
   @override Future<LspHover?> hover({required String uri, required CharPosition position}) async {
     if (!_ready) return null;
@@ -129,8 +170,19 @@ class LspSocketClient implements LspClient {
   }
   @override Future<List<LspDiagnostic>> diagnostics({required String uri}) async => _diagMap[uri] ?? [];
 
+  @override
   StreamSubscription<List<LspDiagnostic>> listenDiagnostics(String uri, void Function(List<LspDiagnostic>) cb) =>
-      _diagCtrl.stream.where((m) => m['params']?['uri'] == uri).map((_) => _diagMap[uri] ?? <LspDiagnostic>[]).listen(cb);
+      _diagCtrl.stream.where((m) => m['params']?['uri'] == uri).map((_) => _diagMap[uri] ?? <LspDiagnostic>[]).listen(cb, onError: (_) {});
+
+  @override
+  StreamSubscription<void> listenAllDiagnostics(
+      void Function(String uri, List<LspDiagnostic>) onDiag) {
+    return _diagCtrl.stream.listen((m) {
+      final uri = m['params']?['uri'] as String?;
+      if (uri == null) return;
+      onDiag(uri, _diagMap[uri] ?? []);
+    }, onError: (_) {});
+  }
 
   @override Future<List<LspTextEdit>> formatting({required String uri}) async {
     if (!_ready) return [];
@@ -291,15 +343,31 @@ class LspSocketClient implements LspClient {
   LspCompletionResult _comp(Map it) {
     String? doc; final d = it['documentation'];
     if (d is String) doc = d; else if (d is Map) doc = d['value'] as String?;
+    bool isSnippet = (it['insertTextFormat'] as int? ?? 1) == 2;
+    // LSP spec: textEdit.newText takes priority over insertText.
+    final textEdit = it['textEdit'] as Map?;
+    String insertText = (textEdit != null ? textEdit['newText'] as String? : null)
+        ?? it['insertText'] as String? ?? it['label'] as String? ?? '';
+    // Convert "Foo(...)" or "Foo(…)" (Unicode ellipsis U+2026) to a proper $1
+    // snippet so the cursor lands inside the parens.
+    if (!insertText.contains(r'$')) {
+      if (insertText.endsWith('(...)')) {
+        insertText = '${insertText.substring(0, insertText.length - 5)}(\$1)';
+        isSnippet = true;
+      } else if (insertText.endsWith('(\u2026)')) {
+        insertText = '${insertText.substring(0, insertText.length - 3)}(\$1)';
+        isSnippet = true;
+      }
+    }
     return LspCompletionResult(
-      label:       it['label'] as String? ?? '',
-      insertText:  it['insertText'] as String? ?? it['label'] as String? ?? '',
-      filterText:  it['filterText'] as String?,
-      sortText:    it['sortText'] as String?,
-      detail:      it['detail'] as String?,
+      label:         it['label'] as String? ?? '',
+      insertText:    insertText,
+      filterText:    it['filterText'] as String?,
+      sortText:      it['sortText'] as String?,
+      detail:        it['detail'] as String?,
       documentation: doc,
-      kind:        _kind(it['kind'] as int? ?? 1),
-      isSnippet:   (it['insertTextFormat'] as int? ?? 1) == 2,
+      kind:          _kind(it['kind'] as int? ?? 1),
+      isSnippet:     isSnippet,
     );
   }
   LspCompletionKind _kind(int k) {

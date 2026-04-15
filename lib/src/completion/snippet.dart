@@ -38,6 +38,26 @@ class CodeSnippet {
     stops.sort((a, b) => a.index.compareTo(b.index));
     return stops;
   }
+
+  /// Returns each tab stop paired with its byte-offset in the plain text
+  /// (i.e. position within the string returned by [toPlainText]).
+  /// Offsets are in source order, not index order — critical for correct
+  /// cursor placement when there is static text before the first tab stop.
+  List<({int offset, SnippetTabStop tabStop})> get tabStopOffsets {
+    final result = <({int offset, SnippetTabStop tabStop})>[];
+    int offset = 0;
+    for (final part in _parts) {
+      if (part is _TextPart) {
+        offset += part.text.length;
+      } else if (part is _TabStopPart) {
+        result.add((offset: offset, tabStop: part.tabStop));
+        offset += part.tabStop.placeholder.length;
+      } else if (part is _VariablePart) {
+        offset += (part.value ?? '').length;
+      }
+    }
+    return result;
+  }
 }
 
 abstract class _SnippetPart {}

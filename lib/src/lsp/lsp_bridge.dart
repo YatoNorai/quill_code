@@ -5,6 +5,7 @@
 // Developers implement LspClient to forward requests to their LSP server
 // (e.g. via dart_lsp_client, flutter_lsp, or a custom WebSocket/stdio bridge).
 // ─────────────────────────────────────────────────────────────────────────────
+import 'dart:async';
 import '../completion/completion_item.dart';
 import '../core/char_position.dart';
 import '../diagnostics/diagnostic_region.dart';
@@ -46,6 +47,16 @@ class LspCompletionResult {
     insertText: insertText ?? label,
     isSnippet: isSnippet,
   );
+}
+
+/// Wraps an LSP CompletionList response, preserving the isIncomplete flag.
+/// When [isIncomplete] is true the server can produce more items — re-request
+/// with triggerKind=3 (TriggerForIncompleteCompletions) as the user types.
+class LspCompletionList {
+  final List<LspCompletionResult> items;
+  final bool isIncomplete;
+  const LspCompletionList({required this.items, this.isIncomplete = false});
+  static const empty = LspCompletionList(items: []);
 }
 
 class LspDiagnostic {
@@ -158,6 +169,9 @@ class LspInlayHint {
 /// Implement this interface to connect a real LSP server.
 /// All methods are async and return null/empty on error.
 abstract class LspClient {
+  /// True once the LSP initialize handshake completed successfully.
+  /// All methods that touch the server check this flag and return early if false.
+  bool get isReady;
   /// Called when the editor opens a file.
   Future<void> didOpen({
     required String uri,
@@ -177,13 +191,22 @@ abstract class LspClient {
   Future<void> didClose({required String uri});
 
   /// Completion at cursor position.
-  /// [triggerCharacter] is `.`, `(`, `,`, etc. for trigger-based completion;
-  /// null for word-prefix–based invocation.
-  Future<List<LspCompletionResult>> completion({
+  ///
+  /// [triggerCharacter] — set when user typed a trigger char (`.`, `(`, etc.)
+  ///   → sends triggerKind=2 (TriggerCharacter).
+  /// [retriggerIncomplete] — set when the previous response had isIncomplete=true
+  ///   → sends triggerKind=3 (TriggerForIncompleteCompletions).
+  /// Otherwise sends triggerKind=1 (Invoked).
+  Future<LspCompletionList> completion({
     required String uri,
     required CharPosition position,
     String? triggerCharacter,
+    bool retriggerIncomplete = false,
   });
+
+  /// Trigger characters reported by the server in its initialize response.
+  /// Populated after the handshake; empty list before that.
+  List<String> get triggerCharacters;
 
   /// Hover information at position.
   Future<LspHover?> hover({
@@ -214,6 +237,20 @@ abstract class LspClient {
 
   /// Get diagnostics (published by the server, polled here).
   Future<List<LspDiagnostic>> diagnostics({required String uri});
+
+  /// Subscribe to server-pushed diagnostics for [uri].
+  /// Called immediately every time the server sends a publishDiagnostics
+  /// notification — no polling delay. Cancel the returned subscription when done.
+  StreamSubscription<List<LspDiagnostic>> listenDiagnostics(
+      String uri, void Function(List<LspDiagnostic> diags) onDiag);
+
+  /// Subscribe to ALL server-pushed diagnostics regardless of URI.
+  /// Dart analysis server, gopls, etc. push diagnostics for every file they
+  /// analyse — not just the currently open one.  Use this to build a
+  /// project-wide problems list without having to open every file.
+  /// Cancel the returned subscription when done.
+  StreamSubscription<void> listenAllDiagnostics(
+      void Function(String uri, List<LspDiagnostic> diags) onDiag);
 
   /// Format entire document.
   Future<List<LspTextEdit>> formatting({required String uri});
@@ -281,15 +318,21 @@ class LspCodeAction {
 /// A no-op LSP client for testing / offline use.
 class NullLspClient implements LspClient {
   const NullLspClient();
+  @override bool get isReady => false;
   @override Future<void>   didOpen({required uri, required languageId, required text, required version}) async {}
   @override Future<void>   didChange({required uri, required text, required version}) async {}
   @override Future<void>   didClose({required uri}) async {}
-  @override Future<List<LspCompletionResult>> completion({required uri, required position, triggerCharacter}) async => [];
+  @override List<String> get triggerCharacters => const [];
+  @override Future<LspCompletionList> completion({required uri, required position, triggerCharacter, retriggerIncomplete = false}) async => LspCompletionList.empty;
   @override Future<LspHover?> hover({required uri, required position}) async => null;
   @override Future<LspSignatureHelp?> signatureHelp({required uri, required position, triggerCharacter}) async => null;
   @override Future<List<LspLocation>> definition({required uri, required position}) async => [];
   @override Future<List<LspLocation>> references({required uri, required position}) async => [];
   @override Future<List<LspDiagnostic>> diagnostics({required uri}) async => [];
+  @override StreamSubscription<List<LspDiagnostic>> listenDiagnostics(String uri, void Function(List<LspDiagnostic>) onDiag) =>
+      const Stream<List<LspDiagnostic>>.empty().listen(onDiag);
+  @override StreamSubscription<void> listenAllDiagnostics(void Function(String uri, List<LspDiagnostic>) onDiag) =>
+      const Stream<void>.empty().listen((_) {});
   @override Future<List<LspTextEdit>> formatting({required uri}) async => [];
   @override Future<List<LspTextEdit>> rangeFormatting({required uri, required range}) async => [];
   @override Future<Map<String, List<LspTextEdit>>?> rename({required uri, required position, required newName}) async => null;

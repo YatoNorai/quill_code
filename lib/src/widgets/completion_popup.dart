@@ -58,30 +58,6 @@ class _CompletionPopupState extends State<CompletionPopup> {
     final ctrl = widget.controller;
     final items = ctrl.completionItems;
 
-    // LSP request in-flight and no local items yet — show a loading indicator
-    // so the popup position is stable when items arrive.
-    if (items.isEmpty && ctrl.isCompletionLoading) {
-      return Material(
-        elevation: 8,
-        borderRadius: BorderRadius.circular(6),
-        color: cs.completionBackground,
-        child: Container(
-          decoration: BoxDecoration(
-            border: Border.all(color: cs.completionBorder),
-            borderRadius: BorderRadius.circular(6),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: SizedBox(
-            width: 16, height: 16,
-            child: CircularProgressIndicator(
-              strokeWidth: 1.5,
-              color: cs.completionTextMatched,
-            ),
-          ),
-        ),
-      );
-    }
-
     if (items.isEmpty) return const SizedBox.shrink();
 
     final selectedItem = (widget.selectedIndex >= 0 && widget.selectedIndex < items.length)

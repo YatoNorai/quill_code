@@ -117,6 +117,17 @@ class QuillCodeEditor extends StatefulWidget {
   /// Called when LSP go-to-definition resolves to a different file.
   final void Function(String uri, int line, int column)? onNavigateToFile;
 
+  /// Called when the user taps the diagnostic count in the status bar.
+  /// Wire this up to open the Problems panel in the host IDE.
+  final VoidCallback? onDiagnosticTap;
+
+  /// Project-wide diagnostic totals shown in the status bar.
+  /// When supplied the bar displays these counts regardless of which file is
+  /// active, so the indicator never disappears on file switches.
+  final int? projectErrors;
+  final int? projectWarnings;
+  final int? projectInfos;
+
   const QuillCodeEditor({
     super.key,
     required this.controller,
@@ -130,6 +141,10 @@ class QuillCodeEditor extends StatefulWidget {
     this.lspConfig,
     this.fileUri,
     this.onNavigateToFile,
+    this.onDiagnosticTap,
+    this.projectErrors,
+    this.projectWarnings,
+    this.projectInfos,
   });
 
   @override
@@ -219,6 +234,9 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   // ── Cursor visibility — hidden until first user tap ──────────────────
   bool _everActivated = false;
 
+  // ── Last cursor position — scroll only fires when cursor actually moves ──
+  CharPosition? _lastScrollCursor;
+
   // ── Handle state (mutated directly; drives _handleTick not setState) ──
   String? _drag;
   bool    _cursorHandleVisible = false;
@@ -285,7 +303,24 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
   late EditorTheme _effectiveTheme;
   EditorTheme get _theme => _effectiveTheme;
   double get _lh => _effectiveTheme.lineHeightPx;
-  double get _cw => _effectiveTheme.fontSize * 0.601;
+  double _measuredCw = 0;
+  double get _cw => _measuredCw > 0 ? _measuredCw : _effectiveTheme.fontSize * 0.601;
+
+  void _measureCharWidth() {
+    final tp = TextPainter(
+      text: TextSpan(
+        text: 'M',
+        style: TextStyle(
+          fontSize: _effectiveTheme.fontSize,
+          fontFamily: _effectiveTheme.fontFamily,
+          fontWeight: FontWeight.normal,
+          fontStyle: FontStyle.normal,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    _measuredCw = tp.width;
+  }
 
   // Base font size before any pinch-zoom — overlays use this so they don't
   // scale when the user zooms the code text.
@@ -377,6 +412,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     super.initState();
     _effectiveTheme = widget.theme ?? QuillThemeDark.build();
     _baseFontSize   = _effectiveTheme.fontSize;
+    _measureCharWidth();
     _focus = widget.focusNode ?? FocusNode();
     _blink = AnimationController(vsync: this, duration: Duration(milliseconds: widget.controller.props.cursorBlinkIntervalMs))
       ..addStatusListener((s) {
@@ -424,11 +460,12 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
           // Auto-build client from config
           if (cfg is QuillLspStdioConfig) {
             client = await LspStdioClient.start(
-              executable:    cfg.executable,
-              args:          cfg.args,
-              workspacePath: cfg.workspacePath,
-              languageId:    cfg.languageId,
-              environment:   cfg.environment,
+              executable:              cfg.executable,
+              args:                    cfg.args,
+              workspacePath:           cfg.workspacePath,
+              languageId:              cfg.languageId,
+              environment:             cfg.environment,
+              initializeTimeoutSeconds: cfg.initializeTimeoutSeconds,
             );
           } else if (cfg is QuillLspSocketConfig) {
             final sc = LspSocketClient(
@@ -488,11 +525,12 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
         LspClient? client;
         if (cfg is QuillLspStdioConfig) {
           client = await LspStdioClient.start(
-            executable:    cfg.executable,
-            args:          cfg.args,
-            workspacePath: cfg.workspacePath,
-            languageId:    cfg.languageId,
-            environment:   cfg.environment,
+            executable:              cfg.executable,
+            args:                    cfg.args,
+            workspacePath:           cfg.workspacePath,
+            languageId:              cfg.languageId,
+            environment:             cfg.environment,
+            initializeTimeoutSeconds: cfg.initializeTimeoutSeconds,
           );
         } else if (cfg is QuillLspSocketConfig) {
           final sc = LspSocketClient(
@@ -727,6 +765,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
     // object and call _lc.clear() + markNeedsLayout() a second time.
     if (newFs > 0 && (newFs - _effectiveTheme.fontSize).abs() > 0.1) {
       _effectiveTheme = _effectiveTheme.copyWith(fontSize: newFs);
+      _measureCharWidth();
       // Only recompute gutter width when fontSize changes — not every zoom callback.
       final newGw = _calcGw();
       if ((newGw - _gwN.value).abs() > 0.5) _gwN.value = newGw;
@@ -812,7 +851,14 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
         });
       }
     }
-    _ensureCursorVisible();
+    // Only scroll to cursor when it actually moved — prevents diagnostic
+    // and style notifications (which don't move the cursor) from resetting
+    // scroll position to line 0 on every LSP update.
+    final curPos = ctrl.cursor.position;
+    if (curPos != _lastScrollCursor) {
+      _lastScrollCursor = curPos;
+      _ensureCursorVisible();
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -2316,8 +2362,12 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
         ),
         if (ctrl.props.showStatusBar)
           StatusBarWidget(
-            controller: ctrl,
-            theme: _overlayTheme,
+            controller:      ctrl,
+            theme:           _overlayTheme,
+            onDiagnosticTap: widget.onDiagnosticTap,
+            projectErrors:   widget.projectErrors,
+            projectWarnings: widget.projectWarnings,
+            projectInfos:    widget.projectInfos,
           ),
       ]),
     );
@@ -3013,7 +3063,7 @@ class _QCEState extends State<QuillCodeEditor> with TickerProviderStateMixin imp
             // blinkAlpha is a ValueNotifier owned by State. _EBox subscribes to
             // it directly so cursor opacity changes never touch the widget tree.
             blinkAlpha:       _blinkAlpha,
-            showCursor:       !ctrl.props.readOnly && !ctrl.cursor.hasSelection,
+            showCursor:       _everActivated && !ctrl.props.readOnly && !ctrl.cursor.hasSelection,
             vpSize:           _vpSize,
             vis:              _visibleLines(),
             visFoldFree:      _cachedFoldFree,
@@ -3727,6 +3777,7 @@ class _EditorViewport extends LeafRenderObjectWidget {
     final contentColumn = (_pinchFocal.dx - _gw - _codePad + oldSX) / oldCw;
 
     _theme = _theme.copyWith(fontSize: newFs);
+    _measuredCw = 0;
     _lc.clear();
     _wrapHeights        = const [];
     _wrapHeightsDirtyVi = -1;
@@ -3823,7 +3874,7 @@ class _EditorViewport extends LeafRenderObjectWidget {
     _wrapHeightsDirtyVi = -1;
     markNeedsLayout();
   }
-  set theme(EditorTheme v)        { if (_theme == v) return; _theme = v; _lc.clear(); _wrapOffsets = const []; _wrapHeights = const []; _wrapHeightsDirtyVi = -1; markNeedsLayout(); }
+  set theme(EditorTheme v)        { if (_theme == v) return; _theme = v; _measuredCw = 0; _lc.clear(); _wrapOffsets = const []; _wrapHeights = const []; _wrapHeightsDirtyVi = -1; markNeedsLayout(); }
   set gw(double v)                { if (_gw == v) return; _gw = v; markNeedsLayout(); }
   set vOff(ViewportOffset v)      { if (_vOff == v) return; _vOff.removeListener(markNeedsPaint); _vOff = v; _vOff.addListener(markNeedsPaint); markNeedsPaint(); }
   set hOff(ViewportOffset v)      { if (_hOff == v) return; _hOff.removeListener(markNeedsPaint); _hOff = v; _hOff.addListener(markNeedsPaint); markNeedsPaint(); }
@@ -3872,7 +3923,23 @@ class _EditorViewport extends LeafRenderObjectWidget {
 
   // lh and cw now derived purely from fontSize — no zoom multiplier
   double get lh => _theme.lineHeightPx;
-  double get cw => _theme.fontSize * 0.601;
+  double _measuredCw = 0;
+  double get cw {
+    if (_measuredCw > 0) return _measuredCw;
+    final tp = TextPainter(
+      text: TextSpan(
+        text: 'M',
+        style: TextStyle(
+          fontSize: _theme.fontSize,
+          fontFamily: _theme.fontFamily,
+          fontWeight: FontWeight.normal,
+          fontStyle: FontStyle.normal,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    return _measuredCw = tp.width;
+  }
   static const double _codePad      = 6.0;
   static const double _swatchSize   = 9.0;
   static const double _swatchRightGap = 5.0;
@@ -4061,7 +4128,7 @@ class _EditorViewport extends LeafRenderObjectWidget {
     // ── Git-diff / per-line style backgrounds ────────────────────────────────
     if (_ctrl.styles.lineStyles.isNotEmpty) _paintLineStyles(c, off, cs, sY, sX, fl, ll);
 
-    if (_ctrl.props.highlightCurrentLine && !_ctrl.cursor.hasSelection) {
+    if (_ctrl.props.highlightCurrentLine && _showCursor) {
       final ci = _vi(_ctrl.cursor.line);
       if (ci >= fl && ci <= ll) {
         final style = _ctrl.props.lineHighlightStyle;
@@ -5016,10 +5083,8 @@ class _EditorViewport extends LeafRenderObjectWidget {
       TextPosition(offset: col),
       Rect.fromLTWH(0, 0, _theme.cursorWidth, _rowH(vi)),
     );
-
     final x = off.dx + _gw + _codePad + caret.dx - sX;
-   // final y = off.dy + _rowY(vi) - sY + caret.dy;
-   final y = off.dy + _rowY(vi) - sY; // ignora caret.dy: varia com métricas do TextPainter
+    final y = off.dy + _rowY(vi) - sY;
     _pCursor.color       = _cachedCursorColor;
     _pCursor.strokeWidth = _theme.cursorWidth;
     c.drawLine(Offset(x, y + 1), Offset(x, y + _rowH(vi) - 1), _pCursor);

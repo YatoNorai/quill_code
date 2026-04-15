@@ -1,0 +1,24 @@
+# ninja log v5
+1	105	7973519420299001	CMakeFiles/quill_perf.dir/quill_perf_stub.c.o	4f39cbe944cdeb5f
+105	313	7973519422459011	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+1	573	7975681663067562	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+0	266	7975771562412849	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+0	139	7975783325733999	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+0	137	7975796930264261	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+1	219	7975805704223564	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+0	151	7975821537810718	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+0	139	7975868835098186	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+1	146	7976056266925521	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+1	139	7976074330789211	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+1	290	7978199117794180	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+0	279	7979050225935790	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+0	277	7979184467381189	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+0	267	7979198910468724	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+0	271	7979215075055174	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+1	227	7979221676089350	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+0	219	7979241552724888	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+1	227	7979291101086020	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+0	235	7979302798178194	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+0	229	7979370110289748	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+1	237	7979408089896663	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e
+1	233	7979428632069358	D:/apps/fl_ide/build/quill_code/intermediates/cxx/Release/o674k4w4/obj/arm64-v8a/libquill_perf.so	aa617ba13898cd1e

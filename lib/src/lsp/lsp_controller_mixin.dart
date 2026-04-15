@@ -5,6 +5,8 @@
 // - Sets LSP diagnostics
 // - Provides hover/definition/codeAction/signatureHelp/documentSymbols APIs
 import 'dart:async';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import '../core/char_position.dart';
 import '../text/text_range.dart';
 import '../diagnostics/diagnostic_region.dart';
@@ -30,6 +32,7 @@ class LspBinding {
 
   Timer?  _diagTimer;
   Timer?  _changeTimer;
+  StreamSubscription<List<LspDiagnostic>>? _diagSubscription;
   String? _pendingText;
   bool    _opened = false;
   int     _version = 0;
@@ -46,7 +49,35 @@ class LspBinding {
     _version++;
     await client.didOpen(uri: uri, languageId: languageId, text: text, version: _version);
     _opened = true;
-    _startDiagPoll();
+    // Subscribe to server-pushed diagnostics for zero-delay updates.
+    // The server calls publishDiagnostics whenever analysis completes; we
+    // relay those immediately to the editor instead of waiting for a poll.
+    _diagSubscription?.cancel();
+    _diagSubscription = client.listenDiagnostics(uri, _applyPushedDiagnostics);
+    _startDiagPoll(); // keep as a safety-net fallback for pull-only servers
+  }
+
+  void _applyPushedDiagnostics(List<LspDiagnostic> lspDiags) {
+    if (!_opened) return;
+    try {
+      final regions = lspDiags.map((d) => DiagnosticRegion(
+        range:    d.range,
+        severity: _mapSeverity(d.severity),
+        message:  d.message,
+        source:   d.source,
+        code:     d.code,
+      )).toList();
+      // Defer to post-frame so we don't call setState inside a build.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_opened) onDiagnostics(regions);
+      });
+    } catch (e, st) {
+      FlutterError.reportError(FlutterErrorDetails(
+        exception: e, stack: st,
+        library: 'quill_code/lsp',
+        context: ErrorDescription('LspBinding._applyPushedDiagnostics'),
+      ));
+    }
   }
 
   Future<void> change(String text) async {
@@ -56,13 +87,22 @@ class LspBinding {
     // on mobile where stdin pipe writes are expensive).
     _pendingText = text;
     _changeTimer?.cancel();
-    _changeTimer = Timer(const Duration(milliseconds: 150), () async {
-      if (!_opened || _pendingText == null) return;
-      _version++;
-      await client.didChange(uri: uri, text: _pendingText!, version: _version);
-      _pendingText = null;
-      _diagTimer?.cancel();
-      _diagTimer = Timer(const Duration(milliseconds: 200), _pollDiagnostics);
+    _changeTimer = Timer(const Duration(milliseconds: 80), () async {
+      try {
+        if (!_opened || _pendingText == null) return;
+        _version++;
+        await client.didChange(uri: uri, text: _pendingText!, version: _version);
+        _pendingText = null;
+        // das (Dart Analysis Server) pushes publishDiagnostics automatically —
+        // no need to poll right after didChange. The 5s periodic poll in
+        // _startDiagPoll() is still the safety net for pull-only servers.
+      } catch (e, st) {
+        FlutterError.reportError(FlutterErrorDetails(
+          exception: e, stack: st,
+          library: 'quill_code/lsp',
+          context: ErrorDescription('LspBinding.change() timer callback'),
+        ));
+      }
     });
   }
 
@@ -78,24 +118,37 @@ class LspBinding {
     _pendingText = null;
   }
 
-  Future<void> close() async {
+  /// Cancel timers / subscriptions and optionally send textDocument/didClose.
+  ///
+  /// Pass [sendClose] = false when switching active tabs — the file stays open
+  /// on the server so it keeps pushing diagnostics for the project-wide view.
+  /// Pass [sendClose] = true (default) when the file tab is explicitly closed
+  /// by the user so the server can free its per-document state.
+  Future<void> close({bool sendClose = true}) async {
     _changeTimer?.cancel();
     _diagTimer?.cancel();
-    if (_opened) await client.didClose(uri: uri);
+    _diagSubscription?.cancel();
+    _diagSubscription = null;
+    if (sendClose && _opened) await client.didClose(uri: uri);
     _opened = false;
   }
 
   // ── Completions ────────────────────────────────────────────────────────────
 
-  Future<List<CompletionItem>> completionsAt(CharPosition pos,
-      {String? triggerCharacter}) async {
-    if (!_opened) return [];
+  /// Server-advertised trigger characters (populated after initialize handshake).
+  List<String> get triggerCharacters => client.triggerCharacters;
+
+  Future<({List<CompletionItem> items, bool isIncomplete})> completionsAt(
+      CharPosition pos, {String? triggerCharacter, bool retriggerIncomplete = false}) async {
+    if (!_opened) return (items: const <CompletionItem>[], isIncomplete: false);
     // Ensure the server has the latest document before requesting completions.
     await _flushPendingChange();
     try {
-      final results = await client.completion(
-          uri: uri, position: pos, triggerCharacter: triggerCharacter);
-      return results.map((r) {
+      final list = await client.completion(
+          uri: uri, position: pos,
+          triggerCharacter: triggerCharacter,
+          retriggerIncomplete: retriggerIncomplete);
+      final items = list.items.map((r) {
         final kind = _mapKind(r.kind);
         return CompletionItem(
           label:         r.label,
@@ -111,7 +164,8 @@ class LspBinding {
           rawLspData:    r, // store original for resolve request
         );
       }).toList();
-    } catch (_) { return []; }
+      return (items: items, isIncomplete: list.isIncomplete);
+    } catch (_) { return (items: const <CompletionItem>[], isIncomplete: false); }
   }
 
   /// Fetch full documentation for a single item (Monaco lazy-resolve pattern).
@@ -134,10 +188,10 @@ class LspBinding {
 
   void _startDiagPoll() {
     _diagTimer?.cancel();
-    // Slow fallback: every 5s re-check even if no edits happened.
-    // The main diagnostic path is the 500ms debounce after each change().
-    // 5s is just a safety net for servers that push without responding to pulls.
-    _diagTimer = Timer.periodic(const Duration(seconds: 5), (_) => _pollDiagnostics());
+    // Slow fallback: every 10s re-check even if no edits happened.
+    // The main diagnostic path is push-based (publishDiagnostics from das).
+    // 10s is just a safety net for pull-only servers.
+    _diagTimer = Timer.periodic(const Duration(seconds: 10), (_) => _pollDiagnostics());
   }
 
   Future<void> _pollDiagnostics() async {
@@ -151,9 +205,17 @@ class LspBinding {
         source:   d.source,
         code:     d.code,
       )).toList();
+      // onDiagnostics → setDiagnostics → notifyListeners already covers the
+      // UI update. Calling onNotify() here again would double-notify and
+      // cause spurious scroll resets and repaints on every poll cycle.
       onDiagnostics(regions);
-      onNotify();
-    } catch (_) {}
+    } catch (e, st) {
+      FlutterError.reportError(FlutterErrorDetails(
+        exception: e, stack: st,
+        library: 'quill_code/lsp',
+        context: ErrorDescription('LspBinding._pollDiagnostics'),
+      ));
+    }
   }
 
   // ── Hover ──────────────────────────────────────────────────────────────────
